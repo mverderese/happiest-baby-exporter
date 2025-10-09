@@ -417,23 +417,23 @@ def extract_baby_id_from_logs(log_file: str) -> str:
     "--email",
     envvar="HAPPIESTBABY_EMAIL",
     prompt=True,
-    help="Email address for Happiest Baby account (can also use HAPPIESTBABY_EMAIL env var)",
+    help="Email address (can use HAPPIESTBABY_EMAIL env var; interactive prompt if not provided)",
 )
 @click.option(
     "--password",
     envvar="HAPPIESTBABY_PASSWORD",
     prompt=True,
     hide_input=True,
-    help="Password for Happiest Baby account (can also use HAPPIESTBABY_PASSWORD env var)",
+    help="Password (can use HAPPIESTBABY_PASSWORD env var; interactive prompt if not provided)",
 )
 @click.option(
     "--baby-name",
-    help="Baby name (if not provided, will fetch automatically from API)",
+    help="Baby name to fetch data for (if not provided, interactive selection will be provided, unless there is only a single baby)",
 )
 @click.option(
     "--lookback-days",
     type=int,
-    default=730,
+    default=14,
     help="Number of days to look back from today",
     show_default=True,
 )
@@ -446,9 +446,7 @@ def extract_baby_id_from_logs(log_file: str) -> str:
 )
 @click.option(
     "--journal-type",
-    multiple=True,
-    type=click.Choice(["breastfeeding", "bottlefeeding", "diaper", "solidfood", "pumping", "sleep"], case_sensitive=False),
-    help="Journal type(s) to export (can be specified multiple times; if not specified, exports all types)",
+    help="Comma-separated list of journal types to export (breastfeeding,bottlefeeding,diaper,solidfood,pumping,sleep; if not specified, exports all types)",
 )
 @click.option(
     "--units",
@@ -469,7 +467,7 @@ def main(
     baby_name: Optional[str],
     lookback_days: int,
     output_dir: Path,
-    journal_type: tuple,
+    journal_type: Optional[str],
     units: str,
     timezone: str,
 ):
@@ -486,7 +484,16 @@ def main(
 
     # Determine journal types to export
     if journal_type:
-        journal_types = list(journal_type)
+        # Parse comma-separated list
+        valid_types = ["breastfeeding", "bottlefeeding", "diaper", "solidfood", "pumping", "sleep"]
+        journal_types = [t.strip().lower() for t in journal_type.split(",")]
+
+        # Validate types
+        invalid_types = [t for t in journal_types if t not in valid_types]
+        if invalid_types:
+            click.echo(f"Error: Invalid journal type(s): {', '.join(invalid_types)}", err=True)
+            click.echo(f"Valid types: {', '.join(valid_types)}", err=True)
+            sys.exit(1)
     else:
         journal_types = ["breastfeeding", "bottlefeeding", "diaper", "solidfood", "pumping", "sleep"]
 
