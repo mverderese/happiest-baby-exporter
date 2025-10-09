@@ -12,6 +12,7 @@ Export journal data from Happiest Baby API to CSV files.
 
 import csv
 import json
+import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -21,19 +22,65 @@ import click
 import requests
 
 
-def load_token(token_file: str) -> str:
-    """Load authentication token from file."""
-    token_path = Path(token_file)
-    if not token_path.exists():
-        click.echo(f"Error: Token file '{token_file}' not found", err=True)
+COGNITO_ENDPOINT = "https://cognito-idp.us-east-1.amazonaws.com/"
+CLIENT_ID = "6kqofhc8hm394ielqdkvli0oea"
+
+
+def authenticate(email: str, password: str) -> str:
+    """Authenticate with AWS Cognito and return IdToken."""
+    headers = {
+        "Content-Type": "application/x-amz-json-1.1",
+        "X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth",
+    }
+
+    payload = {
+        "AuthFlow": "USER_PASSWORD_AUTH",
+        "AuthParameters": {
+            "USERNAME": email,
+            "PASSWORD": password,
+        },
+        "ClientId": CLIENT_ID,
+    }
+
+    try:
+        response = requests.post(COGNITO_ENDPOINT, json=payload, headers=headers, timeout=30)
+        response.raise_for_status()
+
+        data = response.json()
+
+        if "AuthenticationResult" not in data:
+            click.echo("Error: Authentication failed - no token in response", err=True)
+            sys.exit(1)
+
+        id_token = data["AuthenticationResult"]["IdToken"]
+        return id_token
+
+    except requests.exceptions.HTTPError as e:
+        click.echo(f"Error: Authentication failed - {e}", err=True)
+        try:
+            error_data = e.response.json()
+            if "__type" in error_data:
+                click.echo(f"  {error_data['__type']}: {error_data.get('message', '')}", err=True)
+        except:
+            pass
+        sys.exit(1)
+    except requests.exceptions.RequestException as e:
+        click.echo(f"Error: Network error - {e}", err=True)
         sys.exit(1)
 
-    with open(token_path, "r") as f:
-        token = f.read().strip()
-        # Remove "Bearer " prefix if present
-        if token.startswith("Bearer "):
-            token = token[7:]  # Remove "Bearer " (7 characters)
-        return token
+
+def fetch_babies(token: str) -> List[Dict[str, Any]]:
+    """Fetch list of babies from API."""
+    url = "https://api-us-east-1-prod.happiestbaby.com/us/me/v10/babies"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        click.echo(f"Error: Failed to fetch babies - {e}", err=True)
+        sys.exit(1)
 
 
 def fetch_journals(
@@ -170,6 +217,8 @@ def clean_journal_entry(
     entry: Dict[str, Any],
     journal_type: str,
     units: str,
+    baby_id: Optional[str] = None,
+    baby_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Clean and transform a journal entry according to export rules."""
     cleaned = {}
@@ -179,6 +228,11 @@ def clean_journal_entry(
         if key in ("id", "userId"):
             continue
 
+        # Replace babyId with babyName
+        if key == "babyId" and baby_id and baby_name and value == baby_id:
+            cleaned["babyName"] = baby_name
+            continue
+
         # Remove 'data_' prefix
         if key.startswith("data_"):
             key = key[5:]  # Remove 'data_' prefix
@@ -186,11 +240,11 @@ def clean_journal_entry(
         # Handle units - keep only imperial or metric
         if units == "imperial":
             # Skip metric fields
-            if key.endswith("_ml") or key.endswith("_metric"):
+            if key.endswith("Metric") or key.endswith("_ml") or "metric" in key.lower():
                 continue
         else:  # metric
             # Skip imperial fields
-            if key.endswith("_oz") or key.endswith("_imperial"):
+            if key.endswith("Imperial") or key.endswith("_oz") or "imperial" in key.lower():
                 continue
 
         # Special handling for diaper types field
@@ -207,29 +261,34 @@ def clean_journal_entry(
 
 
 def order_fields(fieldnames: List[str]) -> List[str]:
-    """Order fields with time fields first and audit fields last."""
+    """Order fields with babyName first, time fields next, and audit fields last."""
+    baby_name_field = []
     time_fields = []
     audit_fields = []
     other_fields = []
 
     for field in fieldnames:
-        if field in ("startTime", "endTime"):
+        if field == "babyName":
+            baby_name_field.append(field)
+        elif field in ("startTime", "endTime"):
             time_fields.append(field)
         elif field in ("createdAt", "updatedAt"):
             audit_fields.append(field)
         else:
             other_fields.append(field)
 
-    # Sort within each group
-    time_fields.sort()  # endTime, startTime alphabetically
-    # But we want startTime first, then endTime
+    # Order time fields: startTime first, then endTime
     if "startTime" in time_fields and "endTime" in time_fields:
         time_fields = ["startTime", "endTime"]
+    elif "startTime" in time_fields:
+        time_fields = ["startTime"]
+    elif "endTime" in time_fields:
+        time_fields = ["endTime"]
 
     other_fields.sort()
     audit_fields.sort()  # createdAt, updatedAt alphabetically
 
-    return time_fields + other_fields + audit_fields
+    return baby_name_field + time_fields + other_fields + audit_fields
 
 
 def export_to_csv(
@@ -237,6 +296,8 @@ def export_to_csv(
     output_file: str,
     journal_type: str,
     units: str,
+    baby_id: Optional[str] = None,
+    baby_name: Optional[str] = None,
 ) -> None:
     """Export journal data to CSV file."""
     if not journals:
@@ -248,7 +309,7 @@ def export_to_csv(
     flattened = [flatten_dict(journal, preserve_lists=preserve_lists) for journal in journals]
 
     # Clean entries
-    cleaned = [clean_journal_entry(entry, journal_type, units) for entry in flattened]
+    cleaned = [clean_journal_entry(entry, journal_type, units, baby_id, baby_name) for entry in flattened]
 
     # Get all unique keys across all entries
     all_keys = set()
@@ -288,20 +349,21 @@ def extract_baby_id_from_logs(log_file: str) -> str:
 
 @click.command()
 @click.option(
-    "--token-file",
-    default=".token",
-    help="Path to file containing authentication token",
-    show_default=True,
+    "--email",
+    envvar="HAPPIESTBABY_EMAIL",
+    prompt=True,
+    help="Email address for Happiest Baby account (can also use HAPPIESTBABY_EMAIL env var)",
 )
 @click.option(
-    "--request-log",
-    default="request-logs.csv",
-    help="Path to request log CSV file",
-    show_default=True,
+    "--password",
+    envvar="HAPPIESTBABY_PASSWORD",
+    prompt=True,
+    hide_input=True,
+    help="Password for Happiest Baby account (can also use HAPPIESTBABY_PASSWORD env var)",
 )
 @click.option(
-    "--baby-id",
-    help="Baby ID (if not provided, will be extracted from request logs)",
+    "--baby-name",
+    help="Baby name (if not provided, will fetch automatically from API)",
 )
 @click.option(
     "--lookback-days",
@@ -337,9 +399,9 @@ def extract_baby_id_from_logs(log_file: str) -> str:
     show_default=True,
 )
 def main(
-    token_file: str,
-    request_log: str,
-    baby_id: Optional[str],
+    email: str,
+    password: str,
+    baby_name: Optional[str],
     lookback_days: int,
     output_dir: Path,
     journal_type: tuple,
@@ -351,8 +413,11 @@ def main(
     Each journal type will be exported to a separate CSV file named
     'journals_<type>.csv' in the output directory.
     """
-    # Load token
-    token = load_token(token_file)
+    # Authenticate
+    click.echo("Authenticating with Happiest Baby...")
+    token = authenticate(email, password)
+    click.echo("✓ Authentication successful")
+    click.echo()
 
     # Determine journal types to export
     if journal_type:
@@ -362,12 +427,51 @@ def main(
 
     # Get baby_id only if needed (not needed for pumping journals only)
     needs_baby_id = any(jtype != "pumping" for jtype in journal_types)
+    baby_id = None
+    selected_baby_name = None
+
     if needs_baby_id:
-        if baby_id is None:
-            baby_id = extract_baby_id_from_logs(request_log)
-            click.echo(f"Extracted baby_id from logs: {baby_id}")
+        click.echo("Fetching babies from API...")
+        babies = fetch_babies(token)
+
+        if not babies:
+            click.echo("Error: No babies found in your account", err=True)
+            sys.exit(1)
+
+        if baby_name is not None:
+            # Find baby by name
+            matching_babies = [b for b in babies if b.get("babyName", "").lower() == baby_name.lower()]
+
+            if not matching_babies:
+                click.echo(f"Error: No baby found with name '{baby_name}'", err=True)
+                click.echo("Available babies:", err=True)
+                for baby in babies:
+                    click.echo(f"  - {baby.get('babyName', 'Unknown')}", err=True)
+                sys.exit(1)
+
+            baby_id = matching_babies[0]["_id"]
+            selected_baby_name = matching_babies[0].get("babyName", "Unknown")
+            click.echo(f"✓ Using baby: {selected_baby_name}")
+        elif len(babies) == 1:
+            baby_id = babies[0]["_id"]
+            selected_baby_name = babies[0].get("babyName", "Unknown")
+            click.echo(f"✓ Using baby: {selected_baby_name}")
         else:
-            click.echo(f"Using provided baby_id: {baby_id}")
+            click.echo(f"Found {len(babies)} babies:")
+            for i, baby in enumerate(babies, 1):
+                name = baby.get("babyName", "Unknown")
+                click.echo(f"  {i}. {name}")
+
+            choice = click.prompt("Select baby number", type=int)
+            if choice < 1 or choice > len(babies):
+                click.echo("Error: Invalid selection", err=True)
+                sys.exit(1)
+
+            baby_id = babies[choice - 1]["_id"]
+            selected_baby_name = babies[choice - 1].get("babyName", "Unknown")
+            click.echo(f"✓ Selected baby: {selected_baby_name}")
+
+    click.echo()
 
     # Set date range
     to_date = datetime.utcnow()
@@ -391,7 +495,7 @@ def main(
 
             output_file = output_dir / f"journals_{jtype}.csv"
 
-            export_to_csv(journals, str(output_file), jtype, units)
+            export_to_csv(journals, str(output_file), jtype, units, baby_id, selected_baby_name)
             click.echo()
         except requests.exceptions.HTTPError as e:
             click.echo(f"  Error fetching {jtype}: {e}", err=True)
