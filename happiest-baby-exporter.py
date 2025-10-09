@@ -396,6 +396,100 @@ def consolidate_sleep_sessions(sleep_entries: List[Dict[str, Any]]) -> List[Dict
     return consolidated
 
 
+def create_consolidated_entry(
+    entry: Dict[str, Any],
+    journal_type: str,
+    baby_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Convert a journal entry to consolidated format."""
+    # For sleep, use startTimeFormatted if available for consistent formatting
+    start_time = entry.get("startTimeFormatted") if journal_type == "sleep" else entry.get("startTime", "")
+    if not start_time:
+        start_time = entry.get("startTime", "")
+
+    consolidated = {
+        "babyName": baby_name or entry.get("babyName", ""),
+        "startTime": start_time,
+        "journalType": journal_type,
+        "type": entry.get("type", ""),
+        "amount_left": None,
+        "amount_right": None,
+        "amount_total": None,
+        "duration_left": None,
+        "duration_right": None,
+        "duration_total": None,
+    }
+
+    if journal_type == "breastfeeding":
+        # Duration in seconds
+        consolidated["duration_left"] = entry.get("left_duration")
+        consolidated["duration_right"] = entry.get("right_duration")
+        consolidated["duration_total"] = entry.get("totalDuration")
+
+    elif journal_type == "bottlefeeding":
+        # Amount in oz (imperial)
+        consolidated["amount_total"] = entry.get("amountImperial")
+
+    elif journal_type == "pumping":
+        # Amount in oz (imperial), calculate total
+        left_amt = entry.get("left_amountImperial")
+        right_amt = entry.get("right_amountImperial")
+        consolidated["amount_left"] = left_amt
+        consolidated["amount_right"] = right_amt
+        if left_amt is not None and right_amt is not None:
+            # Round to 2 decimal places to avoid floating point precision issues
+            consolidated["amount_total"] = round(left_amt + right_amt, 2)
+        elif left_amt is not None:
+            consolidated["amount_total"] = left_amt
+        elif right_amt is not None:
+            consolidated["amount_total"] = right_amt
+
+        # Duration in seconds
+        consolidated["duration_total"] = entry.get("duration")
+
+    elif journal_type == "sleep":
+        # Duration in seconds
+        consolidated["duration_total"] = entry.get("stateDuration")
+
+    elif journal_type == "diaper":
+        # Diaper has type in "types" field (comma-separated)
+        consolidated["type"] = entry.get("types", "")
+
+    return consolidated
+
+
+def consolidate_all_journals(
+    breastfeeding: List[Dict[str, Any]],
+    bottlefeeding: List[Dict[str, Any]],
+    diaper: List[Dict[str, Any]],
+    pumping: List[Dict[str, Any]],
+    sleep: List[Dict[str, Any]],
+    baby_name: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Consolidate all journal types into a single unified format."""
+    consolidated = []
+
+    for entry in breastfeeding:
+        consolidated.append(create_consolidated_entry(entry, "breastfeeding", baby_name))
+
+    for entry in bottlefeeding:
+        consolidated.append(create_consolidated_entry(entry, "bottlefeeding", baby_name))
+
+    for entry in diaper:
+        consolidated.append(create_consolidated_entry(entry, "diaper", baby_name))
+
+    for entry in pumping:
+        consolidated.append(create_consolidated_entry(entry, "pumping", baby_name))
+
+    for entry in sleep:
+        consolidated.append(create_consolidated_entry(entry, "sleep", baby_name))
+
+    # Sort by start time
+    consolidated.sort(key=lambda x: x.get("startTime", ""))
+
+    return consolidated
+
+
 def extract_baby_id_from_logs(log_file: str) -> str:
     """Extract baby_id from request logs."""
     log_path = Path(log_file)
@@ -559,6 +653,15 @@ def main(
     # Create output directory if it doesn't exist
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Store journals for consolidated export
+    all_journals = {
+        "breastfeeding": [],
+        "bottlefeeding": [],
+        "diaper": [],
+        "pumping": [],
+        "sleep": [],
+    }
+
     # Export each journal type
     for jtype in journal_types:
         try:
@@ -578,9 +681,16 @@ def main(
                 consolidated_output = output_dir / "journals_sleep.csv"
                 consolidated = consolidate_sleep_sessions(journals)
                 export_to_csv(consolidated, str(consolidated_output), jtype, units, baby_id, selected_baby_name)
+
+                # Store consolidated sleep for all-journals export
+                all_journals["sleep"] = consolidated
             else:
                 output_file = output_dir / f"journals_{jtype}.csv"
                 export_to_csv(journals, str(output_file), jtype, units, baby_id, selected_baby_name)
+
+                # Store journals for all-journals export
+                if jtype in all_journals:
+                    all_journals[jtype] = journals
 
             click.echo()
         except requests.exceptions.HTTPError as e:
@@ -589,6 +699,45 @@ def main(
         except Exception as e:
             click.echo(f"  Unexpected error for {jtype}: {e}", err=True)
             click.echo()
+
+    # Export consolidated journal with all types
+    click.echo("Creating consolidated journal...")
+
+    # Clean and flatten all journal entries
+    cleaned_journals = {}
+    for jtype, journals in all_journals.items():
+        if journals:
+            preserve_lists = (jtype == "diaper")
+            flattened = [flatten_dict(journal, preserve_lists=preserve_lists) for journal in journals]
+            cleaned = [clean_journal_entry(entry, jtype, units, baby_id, selected_baby_name) for entry in flattened]
+            cleaned_journals[jtype] = cleaned
+        else:
+            cleaned_journals[jtype] = []
+
+    consolidated_all = consolidate_all_journals(
+        breastfeeding=cleaned_journals.get("breastfeeding", []),
+        bottlefeeding=cleaned_journals.get("bottlefeeding", []),
+        diaper=cleaned_journals.get("diaper", []),
+        pumping=cleaned_journals.get("pumping", []),
+        sleep=cleaned_journals.get("sleep", []),
+        baby_name=selected_baby_name,
+    )
+
+    if consolidated_all:
+        consolidated_file = output_dir / "journals_consolidated.csv"
+        fieldnames = [
+            "babyName", "startTime", "journalType", "type",
+            "amount_left", "amount_right", "amount_total",
+            "duration_left", "duration_right", "duration_total"
+        ]
+
+        with open(consolidated_file, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(consolidated_all)
+
+        click.echo(f"  Exported {len(consolidated_all)} entries to {consolidated_file}")
+        click.echo()
 
     click.echo("Export complete!")
 
