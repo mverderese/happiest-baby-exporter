@@ -22,8 +22,16 @@ import click
 import requests
 
 
+# API Configuration
+API_BASE_URL = "https://api-us-east-1-prod.happiestbaby.com"
 COGNITO_ENDPOINT = "https://cognito-idp.us-east-1.amazonaws.com/"
 CLIENT_ID = "6kqofhc8hm394ielqdkvli0oea"
+
+# API Endpoints
+BABIES_ENDPOINT = "/us/me/v10/babies"
+JOURNALS_ENDPOINT = "/cs/me/v11/babies/{baby_id}/journals/tracking"
+PUMPING_ENDPOINT = "/cs/me/v11/pumping-journals/tracking"
+SLEEP_ENDPOINT = "/ss/me/v11/babies/{baby_id}/sessions/daily"
 
 
 def authenticate(email: str, password: str) -> str:
@@ -71,7 +79,7 @@ def authenticate(email: str, password: str) -> str:
 
 def fetch_babies(token: str) -> List[Dict[str, Any]]:
     """Fetch list of babies from API."""
-    url = "https://api-us-east-1-prod.happiestbaby.com/us/me/v10/babies"
+    url = f"{API_BASE_URL}{BABIES_ENDPOINT}"
     headers = {"Authorization": f"Bearer {token}"}
 
     try:
@@ -91,8 +99,7 @@ def fetch_journals(
     token: str,
 ) -> List[Dict[str, Any]]:
     """Fetch journals of a specific type for a date range."""
-    base_url = "https://api-us-east-1-prod.happiestbaby.com"
-    endpoint = f"/cs/me/v11/babies/{baby_id}/journals/tracking"
+    endpoint = JOURNALS_ENDPOINT.format(baby_id=baby_id)
 
     params = {
         "fromDateTime": from_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -104,7 +111,7 @@ def fetch_journals(
         "Authorization": f"Bearer {token}",
     }
 
-    url = f"{base_url}{endpoint}"
+    url = f"{API_BASE_URL}{endpoint}"
     click.echo(f"Fetching {journal_type} journals from {from_date.date()} to {to_date.date()}...")
 
     response = requests.get(url, params=params, headers=headers, timeout=30)
@@ -121,8 +128,6 @@ def fetch_pumping_journals(
     token: str,
 ) -> List[Dict[str, Any]]:
     """Fetch pumping journals for a date range."""
-    base_url = "https://api-us-east-1-prod.happiestbaby.com"
-    endpoint = "/cs/me/v11/pumping-journals/tracking"
 
     params = {
         "fromDateTime": from_date.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
@@ -133,7 +138,7 @@ def fetch_pumping_journals(
         "Authorization": f"Bearer {token}",
     }
 
-    url = f"{base_url}{endpoint}"
+    url = f"{API_BASE_URL}{PUMPING_ENDPOINT}"
     click.echo(f"Fetching pumping journals from {from_date.date()} to {to_date.date()}...")
 
     response = requests.get(url, params=params, headers=headers, timeout=30)
@@ -152,14 +157,13 @@ def fetch_sleep_sessions(
     timezone: str = "America/Los_Angeles",
 ) -> List[Dict[str, Any]]:
     """Fetch sleep sessions for a date range."""
-    base_url = "https://api-us-east-1-prod.happiestbaby.com"
-    endpoint = f"/ss/me/v11/babies/{baby_id}/sessions/daily"
+    endpoint = SLEEP_ENDPOINT.format(baby_id=baby_id)
 
     headers = {
         "Authorization": f"Bearer {token}",
     }
 
-    url = f"{base_url}{endpoint}"
+    url = f"{API_BASE_URL}{endpoint}"
     click.echo(f"Fetching sleep sessions from {from_date.date()} to {to_date.date()}...")
 
     all_sessions = []
