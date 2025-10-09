@@ -223,14 +223,17 @@ def clean_journal_entry(
     """Clean and transform a journal entry according to export rules."""
     cleaned = {}
 
+    # Add babyName for all journal types except pumping (if we have it)
+    if journal_type != "pumping" and baby_name:
+        cleaned["babyName"] = baby_name
+
     for key, value in entry.items():
-        # Skip id and userId fields
-        if key in ("id", "userId"):
+        # Skip id, userId, and isActive fields
+        if key in ("id", "userId", "isActive"):
             continue
 
-        # Replace babyId with babyName
-        if key == "babyId" and baby_id and baby_name and value == baby_id:
-            cleaned["babyName"] = baby_name
+        # Replace babyId with babyName (skip the babyId field entirely since we added babyName above)
+        if key == "babyId":
             continue
 
         # Remove 'data_' prefix
@@ -325,6 +328,68 @@ def export_to_csv(
         writer.writerows(cleaned)
 
     click.echo(f"  Exported to {output_file}")
+
+
+def consolidate_sleep_sessions(sleep_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Consolidate sleep entries by sessionId."""
+    from collections import defaultdict
+    from datetime import datetime as dt
+
+    sessions = defaultdict(list)
+
+    # Group by sessionId
+    for entry in sleep_entries:
+        session_id = entry.get("sessionId")
+        if session_id:
+            sessions[session_id].append(entry)
+
+    consolidated = []
+
+    for session_id, entries in sessions.items():
+        # Find earliest start time
+        start_times = []
+        for entry in entries:
+            start_time = entry.get("startTime")
+            if start_time:
+                try:
+                    # Parse the time string
+                    parsed_time = dt.strptime(start_time, "%Y-%m-%d %H:%M:%S.%f")
+                    start_times.append((parsed_time, start_time))
+                except:
+                    start_times.append((dt.max, start_time))
+
+        if not start_times:
+            continue
+
+        earliest_time = min(start_times)[1]
+
+        # Sum durations
+        total_duration = sum(
+            entry.get("stateDuration", 0)
+            for entry in entries
+            if isinstance(entry.get("stateDuration"), (int, float))
+        )
+
+        # Get distinct types (sorted)
+        types = sorted(set(
+            entry.get("type")
+            for entry in entries
+            if entry.get("type")
+        ))
+        types_str = ",".join(types)
+
+        # Create consolidated entry with fields from first entry
+        consolidated_entry = entries[0].copy()
+        consolidated_entry["startTime"] = earliest_time
+        consolidated_entry["stateDuration"] = total_duration
+        consolidated_entry["type"] = types_str
+
+        consolidated.append(consolidated_entry)
+
+    # Sort by start time
+    consolidated.sort(key=lambda x: x.get("startTime", ""))
+
+    return consolidated
 
 
 def extract_baby_id_from_logs(log_file: str) -> str:
@@ -493,9 +558,19 @@ def main(
             else:
                 journals = fetch_journals(baby_id, jtype, from_date, to_date, token)
 
-            output_file = output_dir / f"journals_{jtype}.csv"
+            if jtype == "sleep":
+                # Export detailed sleep data
+                detailed_output = output_dir / "journals_sleep_detailed.csv"
+                export_to_csv(journals, str(detailed_output), jtype, units, baby_id, selected_baby_name)
 
-            export_to_csv(journals, str(output_file), jtype, units, baby_id, selected_baby_name)
+                # Export consolidated sleep data
+                consolidated_output = output_dir / "journals_sleep.csv"
+                consolidated = consolidate_sleep_sessions(journals)
+                export_to_csv(consolidated, str(consolidated_output), jtype, units, baby_id, selected_baby_name)
+            else:
+                output_file = output_dir / f"journals_{jtype}.csv"
+                export_to_csv(journals, str(output_file), jtype, units, baby_id, selected_baby_name)
+
             click.echo()
         except requests.exceptions.HTTPError as e:
             click.echo(f"  Error fetching {jtype}: {e}", err=True)
