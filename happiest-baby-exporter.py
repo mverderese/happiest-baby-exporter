@@ -14,7 +14,7 @@ import csv
 import json
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -470,7 +470,7 @@ def main(
     journal_type: Optional[str],
     units: str,
     timezone: str,
-):
+) -> None:
     """Export journal data from Happiest Baby API to CSV files.
 
     Each journal type will be exported to a separate CSV file named
@@ -546,7 +546,7 @@ def main(
     click.echo()
 
     # Set date range
-    to_date = datetime.utcnow()
+    to_date = datetime.now(dt_timezone.utc)
     from_date = to_date - timedelta(days=lookback_days)
 
     click.echo(f"Fetching data from {from_date.date()} to {to_date.date()}")
