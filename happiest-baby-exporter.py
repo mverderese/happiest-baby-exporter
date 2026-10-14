@@ -154,7 +154,7 @@ def fetch_sleep_sessions(
     from_date: datetime,
     to_date: datetime,
     token: str,
-    timezone: str = "America/Los_Angeles",
+    timezone: str = "America/New_York",
 ) -> List[Dict[str, Any]]:
     """Fetch sleep sessions for a date range."""
     endpoint = SLEEP_ENDPOINT.format(baby_id=baby_id)
@@ -555,7 +555,7 @@ def extract_baby_id_from_logs(log_file: str) -> str:
 )
 @click.option(
     "--timezone",
-    default="America/Los_Angeles",
+    default="America/New_York",
     help="Timezone for sleep session data",
     show_default=True,
 )

@@ -101,7 +101,7 @@ Options:
                              pumping,sleep; if not specified, exports all types)
   --units [imperial|metric]  Unit system to use for measurements [default: imperial]
   --timezone TEXT            Timezone for sleep session data
-                             [default: America/Los_Angeles]
+                             [default: America/New_York]
   --help                     Show this message and exit.
 ```
 
