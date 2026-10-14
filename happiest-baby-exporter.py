@@ -34,47 +34,93 @@ PUMPING_ENDPOINT = "/cs/me/v11/pumping-journals/tracking"
 SLEEP_ENDPOINT = "/ss/me/v11/babies/{baby_id}/sessions/daily"
 
 
-def authenticate(email: str, password: str) -> str:
-    """Authenticate with AWS Cognito and return IdToken."""
+def _cognito_call(target: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Call a Cognito Identity Provider action, exiting with Cognito's error detail on failure."""
     headers = {
         "Content-Type": "application/x-amz-json-1.1",
-        "X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth",
-    }
-
-    payload = {
-        "AuthFlow": "USER_PASSWORD_AUTH",
-        "AuthParameters": {
-            "USERNAME": email,
-            "PASSWORD": password,
-        },
-        "ClientId": CLIENT_ID,
+        "X-Amz-Target": f"AWSCognitoIdentityProviderService.{target}",
     }
 
     try:
-        response = requests.post(COGNITO_ENDPOINT, json=payload, headers=headers, timeout=30)
+        response = requests.post(
+            COGNITO_ENDPOINT, json={**payload, "ClientId": CLIENT_ID}, headers=headers, timeout=30
+        )
         response.raise_for_status()
-
-        data = response.json()
-
-        if "AuthenticationResult" not in data:
-            click.echo("Error: Authentication failed - no token in response", err=True)
-            sys.exit(1)
-
-        id_token = data["AuthenticationResult"]["IdToken"]
-        return id_token
+        return response.json()
 
     except requests.exceptions.HTTPError as e:
-        click.echo(f"Error: Authentication failed - {e}", err=True)
+        click.echo(f"Error: {target} failed - {e}", err=True)
+        error_type = None
         try:
             error_data = e.response.json()
-            if "__type" in error_data:
-                click.echo(f"  {error_data['__type']}: {error_data.get('message', '')}", err=True)
-        except:
+            error_type = error_data.get("__type")
+            if error_type:
+                click.echo(f"  {error_type}: {error_data.get('message', '')}", err=True)
+        except ValueError:
             pass
+        if payload.get("AuthFlow") == "REFRESH_TOKEN_AUTH" and error_type == "NotAuthorizedException":
+            click.echo("  The refresh token is expired or revoked; generate a new one with build_skill.py", err=True)
         sys.exit(1)
     except requests.exceptions.RequestException as e:
         click.echo(f"Error: Network error - {e}", err=True)
         sys.exit(1)
+
+
+def _cognito_auth(auth_flow: str, auth_parameters: Dict[str, str]) -> Dict[str, Any]:
+    """Call Cognito InitiateAuth and return the AuthenticationResult."""
+    data = _cognito_call("InitiateAuth", {"AuthFlow": auth_flow, "AuthParameters": auth_parameters})
+
+    if "AuthenticationResult" not in data:
+        click.echo("Error: Authentication failed - no token in response", err=True)
+        sys.exit(1)
+
+    return data["AuthenticationResult"]
+
+
+def authenticate(email: str, password: str) -> Dict[str, Any]:
+    """Authenticate with email/password; returns IdToken, RefreshToken, etc."""
+    return _cognito_auth("USER_PASSWORD_AUTH", {"USERNAME": email, "PASSWORD": password})
+
+
+def authenticate_with_refresh_token(refresh_token: str) -> str:
+    """Exchange a refresh token for a fresh IdToken."""
+    result = _cognito_auth("REFRESH_TOKEN_AUTH", {"REFRESH_TOKEN": refresh_token})
+    if "RefreshToken" in result:
+        # The stored token can't be updated (e.g. it's read-only inside a skill), so
+        # once the old token's grace period ends, later runs will fail.
+        click.echo(
+            "Warning: Cognito rotated the refresh token; the stored token will stop working soon. "
+            "Rebuild credentials with build_skill.py if authentication starts failing.",
+            err=True,
+        )
+    return result["IdToken"]
+
+
+def revoke_refresh_token(refresh_token: str) -> None:
+    """Revoke a refresh token so it can no longer be used."""
+    _cognito_call("RevokeToken", {"Token": refresh_token})
+
+
+def refresh_token_from_json(raw: str | bytes, source: str) -> str:
+    """Extract refresh_token from credentials JSON, exiting with a clear error if malformed."""
+    try:
+        token = json.loads(raw)["refresh_token"]
+        if not isinstance(token, str) or not token:
+            raise ValueError("refresh_token must be a non-empty string")
+        return token
+    except (ValueError, KeyError, TypeError) as e:
+        click.echo(f"Error: Could not read refresh token from {source} - {e}", err=True)
+        sys.exit(1)
+
+
+def load_refresh_token(credentials_file: Path) -> str:
+    """Read the refresh token from a credentials JSON file."""
+    try:
+        raw = credentials_file.read_text()
+    except OSError as e:
+        click.echo(f"Error: Could not read refresh token from {credentials_file} - {e}", err=True)
+        sys.exit(1)
+    return refresh_token_from_json(raw, str(credentials_file))
 
 
 def fetch_babies(token: str) -> List[Dict[str, Any]]:
@@ -514,15 +560,22 @@ def extract_baby_id_from_logs(log_file: str) -> str:
 @click.option(
     "--email",
     envvar="HAPPIESTBABY_EMAIL",
-    prompt=True,
-    help="Email address (can use HAPPIESTBABY_EMAIL env var; interactive prompt if not provided)",
+    help="Email address (can use HAPPIESTBABY_EMAIL env var; interactive prompt if no other credentials are provided)",
 )
 @click.option(
     "--password",
     envvar="HAPPIESTBABY_PASSWORD",
-    prompt=True,
-    hide_input=True,
-    help="Password (can use HAPPIESTBABY_PASSWORD env var; interactive prompt if not provided)",
+    help="Password (can use HAPPIESTBABY_PASSWORD env var; interactive prompt if no other credentials are provided)",
+)
+@click.option(
+    "--refresh-token",
+    envvar="HAPPIESTBABY_REFRESH_TOKEN",
+    help="Refresh token to use instead of email/password (can use HAPPIESTBABY_REFRESH_TOKEN env var)",
+)
+@click.option(
+    "--credentials-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="JSON file containing a refresh_token (as created by build_skill.py)",
 )
 @click.option(
     "--baby-name",
@@ -560,8 +613,10 @@ def extract_baby_id_from_logs(log_file: str) -> str:
     show_default=True,
 )
 def main(
-    email: str,
-    password: str,
+    email: Optional[str],
+    password: Optional[str],
+    refresh_token: Optional[str],
+    credentials_file: Optional[Path],
     baby_name: Optional[str],
     lookback_days: int,
     output_dir: Path,
@@ -575,8 +630,32 @@ def main(
     'journals_<type>.csv' in the output directory.
     """
     # Authenticate
+    if refresh_token and credentials_file:
+        click.echo(
+            "Error: Both a refresh token (--refresh-token / HAPPIESTBABY_REFRESH_TOKEN) and "
+            "--credentials-file were given; use only one",
+            err=True,
+        )
+        sys.exit(1)
+
     click.echo("Authenticating with Happiest Baby...")
-    token = authenticate(email, password)
+    if credentials_file:
+        click.echo(f"  Using refresh token from {credentials_file}")
+        token = authenticate_with_refresh_token(load_refresh_token(credentials_file))
+    elif refresh_token:
+        click.echo("  Using refresh token from --refresh-token / HAPPIESTBABY_REFRESH_TOKEN")
+        token = authenticate_with_refresh_token(refresh_token)
+    else:
+        if not (email and password) and not sys.stdin.isatty():
+            click.echo(
+                "Error: No credentials provided; pass --credentials-file, --refresh-token, "
+                "or --email and --password",
+                err=True,
+            )
+            sys.exit(1)
+        email = email or click.prompt("Email")
+        password = password or click.prompt("Password", hide_input=True)
+        token = authenticate(email, password)["IdToken"]
     click.echo("✓ Authentication successful")
     click.echo()
 
@@ -626,6 +705,11 @@ def main(
             baby_id = babies[0]["_id"]
             selected_baby_name = babies[0].get("babyName", "Unknown")
             click.echo(f"✓ Using baby: {selected_baby_name}")
+        elif not sys.stdin.isatty():
+            click.echo("Error: Multiple babies found; pass --baby-name with one of:", err=True)
+            for baby in babies:
+                click.echo(f"  - {baby.get('babyName', 'Unknown')}", err=True)
+            sys.exit(1)
         else:
             click.echo(f"Found {len(babies)} babies:")
             for i, baby in enumerate(babies, 1):
