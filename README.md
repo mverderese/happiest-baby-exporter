@@ -102,7 +102,8 @@ signs in once, and puts a **refresh token** (not your password) into the skill a
 
 - is not your password, so it can't be used to change your password or sign in
   to other services where you've reused it;
-- still gives access to your Happiest Baby account, so treat the zip like a password;
+- still gives access to your Happiest Baby account, including controlling your SNOO
+  and editing your journal, so treat the zip like a password;
 - is stored in your private skill, which only your Claude account can see;
 - can be revoked at any time without affecting your other logins (see below).
 
@@ -130,7 +131,13 @@ In Claude (web or desktop app):
    - `cognito-idp.us-east-1.amazonaws.com`
    - `api-us-east-1-prod.happiestbaby.com`
 
-   Keep package managers allowed too (the skill installs `requests` and `click` with pip).
+   To control the SNOO from Claude, also add your SNOO's AWS IoT host. Find it with
+   `./happiest-baby-actions.py snoo devices` (the `mqtt_host` value, something like
+   `abc123xyz-ats.iot.us-east-1.amazonaws.com`), or just ask Claude to check the SNOO
+   and it will tell you the host it needs.
+
+   Keep package managers allowed too (the skill installs `requests`, `click`,
+   `paho-mqtt`, and `PySocks` with pip).
 
 On a Team or Enterprise plan, an admin may need to allow these settings.
 
@@ -153,6 +160,8 @@ Start a new chat on any device and ask, for example:
 - "Pull the last 3 days of Happiest Baby data"
 - "Summarize last night's SNOO sleep"
 - "Export this week's feeds and diapers as CSV"
+- "Put the SNOO on level 2 and hold it"
+- "Log a wet and dirty diaper at 3:10"
 
 ### Rotating or revoking the token
 
@@ -164,6 +173,39 @@ Start a new chat on any device and ask, for example:
   refresh tokens that were already issued.
 
 If Claude reports that the token is expired or revoked, build and upload a new zip.
+
+## Controlling the SNOO and logging entries
+
+`happiest-baby-actions.py` is a backup for when the Happiest Baby app isn't
+working. It takes the same credential options as the exporter.
+
+```bash
+./happiest-baby-actions.py snoo status
+./happiest-baby-actions.py snoo level 2 --hold     # baseline, 1, 2, 3, or 4
+./happiest-baby-actions.py snoo start
+./happiest-baby-actions.py snoo stop
+./happiest-baby-actions.py snoo white-noise on --minutes 30
+
+./happiest-baby-actions.py journal diaper --pee --poo --at 03:10 --note "blowout"
+./happiest-baby-actions.py journal recent --type breastfeeding
+./happiest-baby-actions.py journal delete <id>
+```
+
+Every change shows what it will do and asks first. Pass `--yes` (before the
+subcommand) to skip the prompt, or `--dry-run` to only show the plan. SNOO
+commands wait for the SNOO to report its new state. If it doesn't report in time,
+the script exits with code 3.
+
+How it works: SNOO commands are sent over AWS IoT MQTT (WebSocket on port 443), the
+same channel the app uses. Journal entries go to the REST API. Both are undocumented
+and were worked out by the [python-snoo](https://pypi.org/project/python-snoo/)
+project, so they may break if Happiest Baby changes them.
+
+- **Confirmed:** SNOO start, stop, level, hold, sticky white noise, and status;
+  logging diapers.
+- **Experimental:** `journal add` (feeds, pumping, solid food) and `journal delete`.
+  For `journal add`, copy the `data` object from `journal recent` for the same type
+  so the new entry looks like the app's.
 
 ## Command-Line Options
 
@@ -255,6 +297,7 @@ Fields are ordered for easy reading: baby name first, followed by time fields, t
 Dependencies are automatically managed by uv:
 - `requests>=2.32.0` - HTTP library for API calls
 - `click>=8.1.0` - Command-line interface framework
+- `paho-mqtt>=2.0.0` and `PySocks>=1.7.1` - SNOO control over MQTT (`happiest-baby-actions.py` only)
 
 ## License
 

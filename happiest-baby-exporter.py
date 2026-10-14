@@ -244,6 +244,90 @@ def fetch_sleep_sessions(
     return all_sessions
 
 
+def get_id_token(
+    email: Optional[str],
+    password: Optional[str],
+    refresh_token: Optional[str],
+    credentials_file: Optional[Path],
+) -> str:
+    """Authenticate from whichever credentials were given and return an IdToken."""
+    if refresh_token and credentials_file:
+        click.echo(
+            "Error: Both a refresh token (--refresh-token / HAPPIESTBABY_REFRESH_TOKEN) and "
+            "--credentials-file were given; use only one",
+            err=True,
+        )
+        sys.exit(1)
+
+    click.echo("Authenticating with Happiest Baby...")
+    if credentials_file:
+        click.echo(f"  Using refresh token from {credentials_file}")
+        token = authenticate_with_refresh_token(load_refresh_token(credentials_file))
+    elif refresh_token:
+        click.echo("  Using refresh token from --refresh-token / HAPPIESTBABY_REFRESH_TOKEN")
+        token = authenticate_with_refresh_token(refresh_token)
+    else:
+        if not (email and password) and not sys.stdin.isatty():
+            click.echo(
+                "Error: No credentials provided; pass --credentials-file, --refresh-token, "
+                "or --email and --password",
+                err=True,
+            )
+            sys.exit(1)
+        email = email or click.prompt("Email")
+        password = password or click.prompt("Password", hide_input=True)
+        token = authenticate(email, password)["IdToken"]
+    click.echo("✓ Authentication successful")
+    return token
+
+
+def select_baby(token: str, baby_name: Optional[str]) -> Dict[str, Any]:
+    """Pick a baby by name, the only baby, or an interactive choice; exits if ambiguous."""
+    click.echo("Fetching babies from API...")
+    babies = fetch_babies(token)
+
+    if not babies:
+        click.echo("Error: No babies found in your account", err=True)
+        sys.exit(1)
+
+    if baby_name is not None:
+        # Find baby by name
+        matching_babies = [b for b in babies if b.get("babyName", "").lower() == baby_name.lower()]
+
+        if not matching_babies:
+            click.echo(f"Error: No baby found with name '{baby_name}'", err=True)
+            click.echo("Available babies:", err=True)
+            for baby in babies:
+                click.echo(f"  - {baby.get('babyName', 'Unknown')}", err=True)
+            sys.exit(1)
+
+        baby = matching_babies[0]
+        click.echo(f"✓ Using baby: {baby.get('babyName', 'Unknown')}")
+    elif len(babies) == 1:
+        baby = babies[0]
+        click.echo(f"✓ Using baby: {baby.get('babyName', 'Unknown')}")
+    elif not sys.stdin.isatty():
+        click.echo("Error: Multiple babies found; pass --baby-name with one of:", err=True)
+        for baby in babies:
+            click.echo(f"  - {baby.get('babyName', 'Unknown')}", err=True)
+        sys.exit(1)
+    else:
+        click.echo(f"Found {len(babies)} babies:")
+        for i, baby in enumerate(babies, 1):
+            name = baby.get("babyName", "Unknown")
+            click.echo(f"  {i}. {name}")
+
+        choice = click.prompt("Select baby number", type=int)
+        if choice < 1 or choice > len(babies):
+            click.echo("Error: Invalid selection", err=True)
+            sys.exit(1)
+
+        baby = babies[choice - 1]
+        click.echo(f"✓ Selected baby: {baby.get('babyName', 'Unknown')}")
+
+    return baby
+
+
 def flatten_dict(d: Dict[str, Any], parent_key: str = "", sep: str = "_", preserve_lists: bool = False) -> Dict[str, Any]:
     """Flatten a nested dictionary."""
     items = []
@@ -629,34 +713,7 @@ def main(
     Each journal type will be exported to a separate CSV file named
     'journals_<type>.csv' in the output directory.
     """
-    # Authenticate
-    if refresh_token and credentials_file:
-        click.echo(
-            "Error: Both a refresh token (--refresh-token / HAPPIESTBABY_REFRESH_TOKEN) and "
-            "--credentials-file were given; use only one",
-            err=True,
-        )
-        sys.exit(1)
-
-    click.echo("Authenticating with Happiest Baby...")
-    if credentials_file:
-        click.echo(f"  Using refresh token from {credentials_file}")
-        token = authenticate_with_refresh_token(load_refresh_token(credentials_file))
-    elif refresh_token:
-        click.echo("  Using refresh token from --refresh-token / HAPPIESTBABY_REFRESH_TOKEN")
-        token = authenticate_with_refresh_token(refresh_token)
-    else:
-        if not (email and password) and not sys.stdin.isatty():
-            click.echo(
-                "Error: No credentials provided; pass --credentials-file, --refresh-token, "
-                "or --email and --password",
-                err=True,
-            )
-            sys.exit(1)
-        email = email or click.prompt("Email")
-        password = password or click.prompt("Password", hide_input=True)
-        token = authenticate(email, password)["IdToken"]
-    click.echo("✓ Authentication successful")
+    token = get_id_token(email, password, refresh_token, credentials_file)
     click.echo()
 
     # Determine journal types to export
@@ -680,50 +737,9 @@ def main(
     selected_baby_name = None
 
     if needs_baby_id:
-        click.echo("Fetching babies from API...")
-        babies = fetch_babies(token)
-
-        if not babies:
-            click.echo("Error: No babies found in your account", err=True)
-            sys.exit(1)
-
-        if baby_name is not None:
-            # Find baby by name
-            matching_babies = [b for b in babies if b.get("babyName", "").lower() == baby_name.lower()]
-
-            if not matching_babies:
-                click.echo(f"Error: No baby found with name '{baby_name}'", err=True)
-                click.echo("Available babies:", err=True)
-                for baby in babies:
-                    click.echo(f"  - {baby.get('babyName', 'Unknown')}", err=True)
-                sys.exit(1)
-
-            baby_id = matching_babies[0]["_id"]
-            selected_baby_name = matching_babies[0].get("babyName", "Unknown")
-            click.echo(f"✓ Using baby: {selected_baby_name}")
-        elif len(babies) == 1:
-            baby_id = babies[0]["_id"]
-            selected_baby_name = babies[0].get("babyName", "Unknown")
-            click.echo(f"✓ Using baby: {selected_baby_name}")
-        elif not sys.stdin.isatty():
-            click.echo("Error: Multiple babies found; pass --baby-name with one of:", err=True)
-            for baby in babies:
-                click.echo(f"  - {baby.get('babyName', 'Unknown')}", err=True)
-            sys.exit(1)
-        else:
-            click.echo(f"Found {len(babies)} babies:")
-            for i, baby in enumerate(babies, 1):
-                name = baby.get("babyName", "Unknown")
-                click.echo(f"  {i}. {name}")
-
-            choice = click.prompt("Select baby number", type=int)
-            if choice < 1 or choice > len(babies):
-                click.echo("Error: Invalid selection", err=True)
-                sys.exit(1)
-
-            baby_id = babies[choice - 1]["_id"]
-            selected_baby_name = babies[choice - 1].get("babyName", "Unknown")
-            click.echo(f"✓ Selected baby: {selected_baby_name}")
+        baby = select_baby(token, baby_name)
+        baby_id = baby["_id"]
+        selected_baby_name = baby.get("babyName", "Unknown")
 
     click.echo()
 
