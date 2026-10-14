@@ -111,7 +111,7 @@ The skill tells Claude never to print the token or ask you for your password.
 ### 1. Build the skill zip (on your computer)
 
 ```bash
-git clone https://github.com/xkrogen/happiest-baby-exporter.git
+git clone https://github.com/mverderese/happiest-baby-exporter.git
 cd happiest-baby-exporter
 ./build_skill.py          # or: uv run build_skill.py
 ```
