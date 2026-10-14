@@ -34,19 +34,16 @@ PUMPING_ENDPOINT = "/cs/me/v11/pumping-journals/tracking"
 SLEEP_ENDPOINT = "/ss/me/v11/babies/{baby_id}/sessions/daily"
 
 
-def authenticate(email: str, password: str) -> str:
-    """Authenticate with AWS Cognito and return IdToken."""
+def _cognito_auth(auth_flow: str, auth_parameters: Dict[str, str]) -> Dict[str, Any]:
+    """Call Cognito InitiateAuth and return the AuthenticationResult."""
     headers = {
         "Content-Type": "application/x-amz-json-1.1",
         "X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth",
     }
 
     payload = {
-        "AuthFlow": "USER_PASSWORD_AUTH",
-        "AuthParameters": {
-            "USERNAME": email,
-            "PASSWORD": password,
-        },
+        "AuthFlow": auth_flow,
+        "AuthParameters": auth_parameters,
         "ClientId": CLIENT_ID,
     }
 
@@ -60,8 +57,7 @@ def authenticate(email: str, password: str) -> str:
             click.echo("Error: Authentication failed - no token in response", err=True)
             sys.exit(1)
 
-        id_token = data["AuthenticationResult"]["IdToken"]
-        return id_token
+        return data["AuthenticationResult"]
 
     except requests.exceptions.HTTPError as e:
         click.echo(f"Error: Authentication failed - {e}", err=True)
@@ -71,9 +67,46 @@ def authenticate(email: str, password: str) -> str:
                 click.echo(f"  {error_data['__type']}: {error_data.get('message', '')}", err=True)
         except:
             pass
+        if auth_flow == "REFRESH_TOKEN_AUTH":
+            click.echo("  The refresh token is expired or revoked; generate a new one with build_skill.py", err=True)
         sys.exit(1)
     except requests.exceptions.RequestException as e:
         click.echo(f"Error: Network error - {e}", err=True)
+        sys.exit(1)
+
+
+def authenticate(email: str, password: str) -> Dict[str, Any]:
+    """Authenticate with email/password; returns IdToken, RefreshToken, etc."""
+    return _cognito_auth("USER_PASSWORD_AUTH", {"USERNAME": email, "PASSWORD": password})
+
+
+def authenticate_with_refresh_token(refresh_token: str) -> str:
+    """Exchange a refresh token for a fresh IdToken."""
+    return _cognito_auth("REFRESH_TOKEN_AUTH", {"REFRESH_TOKEN": refresh_token})["IdToken"]
+
+
+def revoke_refresh_token(refresh_token: str) -> None:
+    """Revoke a refresh token so it can no longer be used."""
+    headers = {
+        "Content-Type": "application/x-amz-json-1.1",
+        "X-Amz-Target": "AWSCognitoIdentityProviderService.RevokeToken",
+    }
+    response = requests.post(
+        COGNITO_ENDPOINT,
+        json={"ClientId": CLIENT_ID, "Token": refresh_token},
+        headers=headers,
+        timeout=30,
+    )
+    response.raise_for_status()
+
+
+def load_refresh_token(credentials_file: Path) -> str:
+    """Read the refresh token from a credentials JSON file."""
+    try:
+        with open(credentials_file) as f:
+            return json.load(f)["refresh_token"]
+    except (OSError, ValueError, KeyError) as e:
+        click.echo(f"Error: Could not read refresh token from {credentials_file} - {e}", err=True)
         sys.exit(1)
 
 
@@ -514,15 +547,22 @@ def extract_baby_id_from_logs(log_file: str) -> str:
 @click.option(
     "--email",
     envvar="HAPPIESTBABY_EMAIL",
-    prompt=True,
-    help="Email address (can use HAPPIESTBABY_EMAIL env var; interactive prompt if not provided)",
+    help="Email address (can use HAPPIESTBABY_EMAIL env var; interactive prompt if no other credentials are provided)",
 )
 @click.option(
     "--password",
     envvar="HAPPIESTBABY_PASSWORD",
-    prompt=True,
-    hide_input=True,
-    help="Password (can use HAPPIESTBABY_PASSWORD env var; interactive prompt if not provided)",
+    help="Password (can use HAPPIESTBABY_PASSWORD env var; interactive prompt if no other credentials are provided)",
+)
+@click.option(
+    "--refresh-token",
+    envvar="HAPPIESTBABY_REFRESH_TOKEN",
+    help="Refresh token to use instead of email/password (can use HAPPIESTBABY_REFRESH_TOKEN env var)",
+)
+@click.option(
+    "--credentials-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="JSON file containing a refresh_token (as created by build_skill.py)",
 )
 @click.option(
     "--baby-name",
@@ -560,8 +600,10 @@ def extract_baby_id_from_logs(log_file: str) -> str:
     show_default=True,
 )
 def main(
-    email: str,
-    password: str,
+    email: Optional[str],
+    password: Optional[str],
+    refresh_token: Optional[str],
+    credentials_file: Optional[Path],
     baby_name: Optional[str],
     lookback_days: int,
     output_dir: Path,
@@ -576,7 +618,14 @@ def main(
     """
     # Authenticate
     click.echo("Authenticating with Happiest Baby...")
-    token = authenticate(email, password)
+    if credentials_file:
+        refresh_token = load_refresh_token(credentials_file)
+    if refresh_token:
+        token = authenticate_with_refresh_token(refresh_token)
+    else:
+        email = email or click.prompt("Email")
+        password = password or click.prompt("Password", hide_input=True)
+        token = authenticate(email, password)["IdToken"]
     click.echo("✓ Authentication successful")
     click.echo()
 
@@ -626,6 +675,11 @@ def main(
             baby_id = babies[0]["_id"]
             selected_baby_name = babies[0].get("babyName", "Unknown")
             click.echo(f"✓ Using baby: {selected_baby_name}")
+        elif not sys.stdin.isatty():
+            click.echo("Error: Multiple babies found; pass --baby-name with one of:", err=True)
+            for baby in babies:
+                click.echo(f"  - {baby.get('babyName', 'Unknown')}", err=True)
+            sys.exit(1)
         else:
             click.echo(f"Found {len(babies)} babies:")
             for i, baby in enumerate(babies, 1):

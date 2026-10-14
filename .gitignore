@@ -1,3 +1,6 @@
 journals_*
 .claude
 .token
+dist/
+credentials.json
+__pycache__/
