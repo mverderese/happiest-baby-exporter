@@ -22,7 +22,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import click
-import requests
 
 REPO_DIR = Path(__file__).resolve().parent
 SKILL_NAME = "happiest-baby"
@@ -36,12 +35,23 @@ def load_exporter():
     return module
 
 
-def read_refresh_token_from(path: Path) -> str:
+def read_refresh_token_from(exporter, path: Path) -> str:
     """Read refresh_token from a credentials.json or a previously built skill zip."""
-    if path.suffix == ".zip":
+    if path.suffix != ".zip":
+        return exporter.load_refresh_token(path)
+    try:
         with zipfile.ZipFile(path) as zf:
-            return json.loads(zf.read(f"{SKILL_NAME}/credentials.json"))["refresh_token"]
-    return json.loads(path.read_text())["refresh_token"]
+            raw = zf.read(f"{SKILL_NAME}/credentials.json")
+    except (OSError, zipfile.BadZipFile, KeyError) as e:
+        click.echo(f"Error: Could not read credentials from {path} - {e}", err=True)
+        sys.exit(1)
+    return exporter.refresh_token_from_json(raw, str(path))
+
+
+def default_output() -> Path:
+    """A new timestamped path, so rebuilding never overwrites a token you may still need to revoke."""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return REPO_DIR / "dist" / f"{SKILL_NAME}-{stamp}.zip"
 
 
 @click.command()
@@ -50,9 +60,7 @@ def read_refresh_token_from(path: Path) -> str:
 @click.option(
     "--output",
     type=click.Path(dir_okay=False, path_type=Path),
-    default=REPO_DIR / "dist" / f"{SKILL_NAME}.zip",
-    help="Where to write the skill zip",
-    show_default=True,
+    help="Where to write the skill zip (must not already exist)  [default: dist/happiest-baby-<timestamp>.zip]",
 )
 @click.option(
     "--revoke",
@@ -61,17 +69,20 @@ def read_refresh_token_from(path: Path) -> str:
     help="Revoke the refresh token inside a previously built zip (or credentials.json) and exit",
 )
 def main(email, password, output: Path, revoke_path: Path) -> None:
-    """Build dist/happiest-baby.zip for upload to Claude (Settings > Capabilities > Skills)."""
+    """Build a skill zip in dist/ for upload to Claude (Settings > Capabilities > Skills)."""
     exporter = load_exporter()
 
     if revoke_path:
-        try:
-            exporter.revoke_refresh_token(read_refresh_token_from(revoke_path))
-        except requests.exceptions.HTTPError as e:
-            click.echo(f"Error: Revocation failed - {e}", err=True)
-            sys.exit(1)
+        # Both helpers print a clear error and exit on failure
+        exporter.revoke_refresh_token(read_refresh_token_from(exporter, revoke_path))
         click.echo(f"✓ Revoked the refresh token in {revoke_path}")
         return
+
+    output = output or default_output()
+    if output.exists():
+        click.echo(f"Error: {output} already exists; it may hold a token you still need to revoke.", err=True)
+        click.echo("Revoke it with --revoke, then delete it, or choose a different --output.", err=True)
+        sys.exit(1)
 
     email = email or click.prompt("Happiest Baby email")
     password = password or click.prompt("Happiest Baby password", hide_input=True)
@@ -86,8 +97,8 @@ def main(email, password, output: Path, revoke_path: Path) -> None:
     }
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    # Create the file owner-only before writing the secret into it
-    fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # O_EXCL guarantees a brand-new file, so the owner-only mode always applies
+    fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "wb") as f, zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.write(REPO_DIR / "skill" / "SKILL.md", f"{SKILL_NAME}/SKILL.md")
         zf.write(REPO_DIR / "happiest-baby-exporter.py", f"{SKILL_NAME}/scripts/happiest-baby-exporter.py")

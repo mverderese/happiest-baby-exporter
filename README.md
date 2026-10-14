@@ -117,7 +117,7 @@ cd happiest-baby-exporter
 ```
 
 Enter your Happiest Baby email and password when prompted. This writes
-`dist/happiest-baby.zip`, which is readable only by you and ignored by git.
+a new `dist/happiest-baby-<timestamp>.zip` (it never overwrites an older one), which is readable only by you and ignored by git.
 
 ### 2. Allow Claude to reach Happiest Baby
 
@@ -137,7 +137,7 @@ On a Team or Enterprise plan, an admin may need to allow these settings.
 ### 3. Upload the skill
 
 1. In Claude on the web (claude.ai) or the desktop app, open **Settings → Capabilities**.
-2. Under **Skills**, click **Upload skill** and pick `dist/happiest-baby.zip`.
+2. Under **Skills**, click **Upload skill** and pick the new `dist/happiest-baby-<timestamp>.zip`.
 3. Make sure the **happiest-baby** skill is switched on.
 
 Skills belong to your account, so after you upload it once from desktop or web it
@@ -156,7 +156,7 @@ Start a new chat on any device and ask, for example:
 
 ### Rotating or revoking the token
 
-- **Revoke** a token you've uploaded: `./build_skill.py --revoke dist/happiest-baby.zip`
+- **Revoke** a token you've uploaded: `./build_skill.py --revoke dist/happiest-baby-<timestamp>.zip`
   (this only signs out that token; your phone app stays signed in).
 - **Replace** it: run `./build_skill.py` again, delete the old skill in Claude, and upload
   the new zip. Then revoke the old zip if you kept it.

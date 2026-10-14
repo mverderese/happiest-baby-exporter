@@ -59,9 +59,13 @@ both in this skill's directory.
 
 ## Troubleshooting
 
-- `NotAuthorizedException` / "refresh token is expired or revoked": the stored token
+- "refresh token is expired or revoked" (a `NotAuthorizedException`): the stored token
   no longer works. Tell the user to run `build_skill.py` from the
   happiest-baby-exporter repo on their computer and re-upload the new zip.
+- Other errors (throttling, 5xx, timeouts) are usually temporary: retry once
+  before telling the user. Don't tell them to rebuild the skill for these.
+- A warning that Cognito "rotated the refresh token" means the stored token will
+  stop working soon; tell the user to rebuild the skill when convenient.
 - Network errors reaching `cognito-idp.us-east-1.amazonaws.com` or
   `api-us-east-1-prod.happiestbaby.com`: those domains must be allowed in the
   user's Claude settings for code execution network access. Tell the user to add
