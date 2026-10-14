@@ -25,8 +25,14 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         base_url = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
-        if not base_url and os.environ.get("VERCEL_PROJECT_PRODUCTION_URL"):
-            base_url = f"https://{os.environ['VERCEL_PROJECT_PRODUCTION_URL']}"
+        if not base_url:
+            # On Vercel: the stable production domain, or the branch's URL on preview deployments
+            if os.environ.get("VERCEL_ENV") == "production":
+                host = os.environ.get("VERCEL_PROJECT_PRODUCTION_URL")
+            else:
+                host = os.environ.get("VERCEL_BRANCH_URL") or os.environ.get("VERCEL_URL")
+            if host:
+                base_url = f"https://{host}"
         if not base_url:
             raise ConfigError("Set PUBLIC_BASE_URL to the server's public https URL")
 
