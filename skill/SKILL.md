@@ -13,6 +13,10 @@ This skill talks to the Happiest Baby (SNOO) API with a refresh token stored in
   (see "Controlling the SNOO and logging entries"). The user relies on this when the
   Happiest Baby app is not working, so be quick and clear.
 
+If this conversation has the Happiest Baby connector's tools (such as `snoo_status` and
+`log_diaper`), use those for SNOO control and logging instead of the scripts. They don't
+need code execution or network settings.
+
 ## Security rules
 
 - `credentials.json` holds a secret. Never print, `cat`, summarize, or quote its

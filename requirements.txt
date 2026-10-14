@@ -1,0 +1,6 @@
+# Dependencies for the MCP server (deployed to Vercel from this repo's root).
+# The CLI scripts declare their own dependencies inline for uv.
+mcp==2.3.0
+cryptography>=44
+requests>=2.32.0
+paho-mqtt>=2.0.0

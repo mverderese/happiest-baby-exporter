@@ -174,10 +174,84 @@ Start a new chat on any device and ask, for example:
 
 If Claude reports that the token is expired or revoked, build and upload a new zip.
 
+## Use as a Claude connector (remote MCP server with OAuth)
+
+The repo also contains an MCP server you can host on [Vercel](https://vercel.com).
+Add it to Claude as a custom connector, and Claude can control the SNOO and use the
+journal on the web, desktop, and mobile apps. You don't need code execution, a skill
+zip, or network allowlists. This is the most reliable way to control the SNOO from
+Claude. The skill above is still handy for CSV exports.
+
+Tools: `snoo_status`, `snoo_start`, `snoo_stop`, `snoo_set_level`, `snoo_white_noise`,
+`list_snoos`, `get_sleep_sessions`, `get_journal_entries`, `log_diaper`, and the
+experimental `log_journal_entry` and `delete_journal_entry`. Claude asks before using
+tools that change something, unless you allow them in the connector's settings.
+
+### How sign-in works
+
+When you connect, Claude sends you to the server's own sign-in page, where you enter
+your Happiest Baby email and password. The server signs in to Happiest Baby once and
+then forgets the password. It keeps nothing on disk and has no database: the tokens it
+gives Claude are encrypted with your `TOKEN_SECRET`, and they carry the Happiest Baby
+login token inside them. Only email addresses listed in `ALLOWED_EMAILS` can sign in.
+
+### 1. Deploy to Vercel
+
+1. Push this repo to your GitHub account, then in Vercel choose **Add New → Project**
+   and import it. Leave the framework preset as **Other** and the root directory as
+   the repo root. `vercel.json` and `requirements.txt` configure the rest.
+2. Under **Settings → Environment Variables**, add:
+
+   | Variable | Value |
+   | - | - |
+   | `TOKEN_SECRET` | Output of `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+   | `ALLOWED_EMAILS` | Your Happiest Baby email (comma-separate to allow a partner's account too) |
+   | `DEFAULT_TIMEZONE` | Optional, e.g. `America/Chicago` (default `America/New_York`) |
+   | `PUBLIC_BASE_URL` | Optional. Defaults to your production URL (`https://<project>.vercel.app`). Set it if you use a custom domain |
+
+3. Deploy, then open `https://<project>.vercel.app/` in a browser. You should see a
+   short page describing the server.
+
+Keep Vercel's Deployment Protection off for the production domain (the default
+"Standard Protection" only covers preview deployments). Claude has to be able to reach
+the server.
+
+### 2. Add the connector in Claude
+
+1. In Claude (web or desktop), open **Settings → Connectors → Add custom connector**.
+2. Name it "Happiest Baby" and enter `https://<project>.vercel.app/mcp`. Leave the
+   OAuth client ID and secret empty, since Claude registers itself.
+3. Click **Connect**, sign in with your Happiest Baby account, and you're sent back to Claude.
+
+Like skills, connectors belong to your account, so it also works in the Claude mobile apps.
+For Claude Code: `claude mcp add --transport http happiest-baby https://<project>.vercel.app/mcp`.
+
+### Disconnecting and revoking
+
+- **One device or connection:** disconnect the connector in Claude.
+- **Everything at once:** change `TOKEN_SECRET` in Vercel and redeploy. Every token
+  the server has issued stops working, and you sign in again on next use.
+- **Remove a person:** take their email out of `ALLOWED_EMAILS` and redeploy. Their
+  tokens stop working on the next request.
+- Changing your Happiest Baby password may also end existing sign-ins.
+
+Sign-ins last as long as Happiest Baby's login token does. When it expires, Claude
+asks you to reconnect.
+
+### Run it locally
+
+```bash
+pip install -r requirements.txt uvicorn pytest
+pytest tests                       # OAuth flow and tools, with Happiest Baby mocked
+PUBLIC_BASE_URL=http://127.0.0.1:8000 TOKEN_SECRET=... ALLOWED_EMAILS=you@example.com \
+  uvicorn api.index:app --port 8000
+```
+
 ## Controlling the SNOO and logging entries
 
-`happiest-baby-actions.py` is a backup for when the Happiest Baby app isn't
-working. It takes the same credential options as the exporter.
+`happiest-baby-actions.py` is a command-line backup for when the Happiest Baby app
+isn't working. It takes the same credential options as the exporter and needs the
+`happiest_baby/` package next to it, so run it from a clone of this repo.
 
 ```bash
 ./happiest-baby-actions.py snoo status
@@ -298,6 +372,8 @@ Dependencies are automatically managed by uv:
 - `requests>=2.32.0` - HTTP library for API calls
 - `click>=8.1.0` - Command-line interface framework
 - `paho-mqtt>=2.0.0` and `PySocks>=1.7.1` - SNOO control over MQTT (`happiest-baby-actions.py` only)
+
+The MCP server's dependencies are in `requirements.txt`.
 
 ## License
 
