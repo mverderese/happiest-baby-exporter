@@ -7,8 +7,10 @@ import base64
 import hashlib
 import secrets
 import sys
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 import pytest
 from cryptography.fernet import Fernet
@@ -286,3 +288,38 @@ def test_refresh_then_revoke(client, fake):
         "grant_type": "refresh_token", "refresh_token": tokens["refresh_token"], "client_id": client_id,
     })
     assert r.status_code == 400 and r.json()["error"] == "invalid_grant"
+
+
+def test_sleep_sessions_mark_manual_and_span_6am_days():
+    def level(session, kind, start, seconds):
+        return {"sessionId": session, "type": kind, "startTime": start.replace("T", " ")[:19] + ".000",
+                "startTimeFormatted": start, "stateDuration": seconds}
+
+    days = {
+        "2026-10-12": {
+            "levels": [level("s1", "asleep", "2026-10-13T04:25:36-0400", 5664),
+                       level("m1", "manual", "2026-10-12T14:50:00-0400", 2400),
+                       level("old", "asleep", "2026-10-12T07:00:00-0400", 600)],
+            "detailedLevels": [{"sessionId": "m1", "level": "MANUAL", "label": "in_arms", "note": "walk",
+                                "sessionDetails": {"startFormatted": "2026-10-12T14:50:00-0400"}}],
+        },
+        "2026-10-13": {
+            "levels": [level("s1", "asleep", "2026-10-13T06:00:00-0400", 5496),
+                       level("s1", "soothing", "2026-10-13T07:31:36-0400", 676)],
+            "detailedLevels": [{"sessionId": "s1", "level": "BASELINE",
+                                "sessionDetails": {"startFormatted": "2026-10-13T04:25:36-0400"}}],
+        },
+    }
+
+    class Client(hb.HappiestBabyClient):
+        def request(self, method, endpoint, params=None, **kwargs):
+            return days.get(params["startTime"][:10], {})
+
+    tz = ZoneInfo("America/New_York")
+    sessions = Client("t").sleep_sessions("b", datetime(2026, 10, 12, 14, 0, tzinfo=tz),
+                                          datetime(2026, 10, 13, 12, 0, tzinfo=tz), "America/New_York")
+    assert [s["sessionId"] for s in sessions] == ["m1", "s1"]
+    manual, snoo = sessions
+    assert manual["source"] == "manual" and manual["label"] == "in_arms" and manual["note"] == "walk"
+    assert snoo["source"] == "snoo" and "label" not in snoo
+    assert snoo["startTime"] == "2026-10-13T04:25:36-0400" and snoo["totalSeconds"] == 5664 + 5496 + 676

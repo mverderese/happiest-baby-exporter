@@ -181,9 +181,14 @@ class HappiestBabyClient:
     # --- SNOO sleep sessions ------------------------------------------------------
 
     def sleep_sessions(self, baby_id: str, from_date: datetime, to_date: datetime, tz: str) -> List[Dict[str, Any]]:
-        """SNOO sessions overlapping the range, one entry per session (levels merged)."""
+        """Sleep sessions (SNOO and manually logged) overlapping the range, one entry per session.
+
+        The API groups sessions into days starting at 6 AM, so the day before is fetched too:
+        a session that began before the first day's 6 AM is then returned whole.
+        """
         levels: List[Dict[str, Any]] = []
-        day = from_date.replace(hour=6, minute=0, second=0, microsecond=0)
+        detailed: List[Dict[str, Any]] = []
+        day = from_date.replace(hour=6, minute=0, second=0, microsecond=0) - timedelta(days=1)
         while day.date() <= to_date.date():
             params = {
                 "detailedLevels": "true",
@@ -194,18 +199,46 @@ class HappiestBabyClient:
             data = self.request("GET", SLEEP_ENDPOINT.format(baby_id=baby_id), params=params)
             if isinstance(data, dict):
                 levels.extend(data.get("levels", []))
+                detailed.extend(data.get("detailedLevels", []))
             elif isinstance(data, list):
                 levels.extend(data)
             day += timedelta(days=1)
-        return consolidate_sleep_levels(levels)
+        return [s for s in consolidate_sleep_levels(levels, detailed) if not _ended_before(s, from_date)]
 
 
-def consolidate_sleep_levels(levels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Merge per-level rows into sessions: earliest start, summed seconds per level type."""
+def _parse_api_time(value: str) -> datetime:
+    """Parse an API time such as 2026-10-12T14:50:00-0400."""
+    return datetime.strptime(value[:19] + value[-5:], "%Y-%m-%dT%H:%M:%S%z")
+
+
+def _ended_before(session: Dict[str, Any], when: datetime) -> bool:
+    try:
+        start = _parse_api_time(session["startTime"])
+    except (TypeError, ValueError):
+        return False
+    return start + timedelta(seconds=session["totalSeconds"]) < when
+
+
+def consolidate_sleep_levels(
+    levels: List[Dict[str, Any]], detailed: Optional[List[Dict[str, Any]]] = None
+) -> List[Dict[str, Any]]:
+    """Merge per-level rows into sessions: start, summed seconds per level type, and whether the
+    session was logged manually in the app (with its tag, e.g. in_arms, and note, if any)."""
     by_session: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for level in levels:
         if level.get("sessionId"):
             by_session[level["sessionId"]].append(level)
+    details: Dict[str, Dict[str, Any]] = {}
+    for row in detailed or []:
+        info = details.setdefault(row.get("sessionId"), {})
+        for key in ("label", "note"):
+            if row.get(key):
+                info[key] = row[key]
+        if row.get("level") == "MANUAL":
+            info["manual"] = True
+        start = (row.get("sessionDetails") or {}).get("startFormatted")
+        if start:
+            info["start"] = start
 
     sessions = []
     for session_id, rows in by_session.items():
@@ -214,11 +247,16 @@ def consolidate_sleep_levels(levels: List[Dict[str, Any]]) -> List[Dict[str, Any
         for row in rows:
             if isinstance(row.get("stateDuration"), (int, float)):
                 seconds_by_type[row.get("type") or "unknown"] += row["stateDuration"]
-        sessions.append({
+        info = details.get(session_id, {})
+        manual = info.get("manual") or "manual" in seconds_by_type
+        session = {
             "sessionId": session_id,
-            "startTime": rows[0].get("startTimeFormatted") or rows[0].get("startTime"),
+            "source": "manual" if manual else "snoo",
+            "startTime": info.get("start") or rows[0].get("startTimeFormatted") or rows[0].get("startTime"),
             "totalSeconds": int(sum(seconds_by_type.values())),
             "secondsByType": {k: int(v) for k, v in sorted(seconds_by_type.items())},
-        })
+        }
+        session.update({key: info[key] for key in ("label", "note") if key in info})
+        sessions.append(session)
     sessions.sort(key=lambda s: s.get("startTime") or "")
     return sessions
