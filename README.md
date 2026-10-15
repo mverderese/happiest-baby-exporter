@@ -38,17 +38,8 @@ For more installation options, see the [uv documentation](https://docs.astral.sh
 
 ## Usage
 
-### Option 1: Run directly from GitHub (no checkout required)
-
-You can run the script directly from GitHub without cloning the repository:
-
-```bash
-uv run https://raw.githubusercontent.com/xkrogen/happiest-baby-exporter/refs/heads/main/happiest-baby-exporter.py
-```
-
-This will prompt you for your email and password interactively.
-
-### Option 2: Clone and run locally
+Clone the repository and run the script from it. It needs the `happiest_baby/`
+package that sits next to it, so it can't be run from a single downloaded file.
 
 ```bash
 git clone https://github.com/xkrogen/happiest-baby-exporter.git
@@ -102,7 +93,8 @@ signs in once, and puts a **refresh token** (not your password) into the skill a
 
 - is not your password, so it can't be used to change your password or sign in
   to other services where you've reused it;
-- still gives access to your Happiest Baby account, so treat the zip like a password;
+- still gives access to your Happiest Baby account, including controlling your SNOO
+  and editing your journal, so treat the zip like a password;
 - is stored in your private skill, which only your Claude account can see;
 - can be revoked at any time without affecting your other logins (see below).
 
@@ -130,7 +122,13 @@ In Claude (web or desktop app):
    - `cognito-idp.us-east-1.amazonaws.com`
    - `api-us-east-1-prod.happiestbaby.com`
 
-   Keep package managers allowed too (the skill installs `requests` and `click` with pip).
+   To control the SNOO from Claude, also add your SNOO's AWS IoT host. Find it with
+   `./happiest-baby-actions.py snoo devices` (the `mqtt_host` value, something like
+   `abc123xyz-ats.iot.us-east-1.amazonaws.com`), or just ask Claude to check the SNOO
+   and it will tell you the host it needs.
+
+   Keep package managers allowed too (the skill installs `requests`, `click`,
+   `paho-mqtt`, and `PySocks` with pip).
 
 On a Team or Enterprise plan, an admin may need to allow these settings.
 
@@ -153,6 +151,8 @@ Start a new chat on any device and ask, for example:
 - "Pull the last 3 days of Happiest Baby data"
 - "Summarize last night's SNOO sleep"
 - "Export this week's feeds and diapers as CSV"
+- "Put the SNOO on level 2 and hold it"
+- "Log a wet and dirty diaper at 3:10"
 
 ### Rotating or revoking the token
 
@@ -164,6 +164,116 @@ Start a new chat on any device and ask, for example:
   refresh tokens that were already issued.
 
 If Claude reports that the token is expired or revoked, build and upload a new zip.
+
+## Use as a Claude connector (remote MCP server with OAuth)
+
+The repo also contains an MCP server you can host on [Vercel](https://vercel.com).
+Add it to Claude as a custom connector, and Claude can control the SNOO and use the
+journal on the web, desktop, and mobile apps. You don't need code execution, a skill
+zip, or network allowlists. This is the most reliable way to control the SNOO from
+Claude. The skill above is still handy for CSV exports.
+
+Tools: `snoo_status`, `snoo_start`, `snoo_stop`, `snoo_set_level`, `snoo_white_noise`,
+`list_snoos`, `get_sleep_sessions`, `get_journal_entries`, `log_diaper`, and the
+experimental `log_journal_entry` and `delete_journal_entry`. Claude asks before using
+tools that change something, unless you allow them in the connector's settings.
+
+### How sign-in works
+
+When you connect, Claude sends you to the server's own sign-in page, where you enter
+your Happiest Baby email and password. The server signs in to Happiest Baby once and
+then forgets the password. It keeps nothing on disk and has no database: the tokens it
+gives Claude are encrypted with your `TOKEN_SECRET`, and they carry the Happiest Baby
+login token inside them. Only email addresses listed in `ALLOWED_EMAILS` can sign in.
+
+### 1. Deploy to Vercel
+
+1. Push this repo to your GitHub account, then in Vercel choose **Add New → Project**
+   and import it. Leave the framework preset as **Other** and the root directory as
+   the repo root. `vercel.json` and `requirements.txt` configure the rest.
+2. Under **Settings → Environment Variables**, add:
+
+   | Variable | Value |
+   | - | - |
+   | `TOKEN_SECRET` | Output of `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+   | `ALLOWED_EMAILS` | Your Happiest Baby email (comma-separate to allow a partner's account too) |
+   | `DEFAULT_TIMEZONE` | Optional, e.g. `America/Chicago` (default `America/New_York`). Prefills the sign-in page's time zone field when the browser doesn't report one |
+   | `PUBLIC_BASE_URL` | Optional. Defaults to your production URL (`https://<project>.vercel.app`). Set it if you use a custom domain |
+
+3. Deploy, then open `https://<project>.vercel.app/` in a browser. You should see a
+   short page describing the server.
+
+Keep Vercel's Deployment Protection off for the production domain (the default
+"Standard Protection" only covers preview deployments). Claude has to be able to reach
+the server.
+
+### 2. Add the connector in Claude
+
+1. In Claude (web or desktop), open **Settings → Connectors → Add custom connector**.
+2. Name it "Happiest Baby" and enter `https://<project>.vercel.app/mcp`. Leave the
+   OAuth client ID and secret empty, since Claude registers itself.
+3. Click **Connect**, sign in with your Happiest Baby account, and you're sent back to Claude.
+   The sign-in page also asks for your time zone, prefilled from your browser. Times
+   like "10:30" are read in that zone, so each person who signs in can use their own.
+   To change it, disconnect and connect again.
+
+Like skills, connectors belong to your account, so it also works in the Claude mobile apps.
+For Claude Code: `claude mcp add --transport http happiest-baby https://<project>.vercel.app/mcp`.
+
+### Disconnecting and revoking
+
+- **One device or connection:** disconnect the connector in Claude.
+- **Everything at once:** change `TOKEN_SECRET` in Vercel and redeploy. Every token
+  the server has issued stops working, and you sign in again on next use.
+- **Remove a person:** take their email out of `ALLOWED_EMAILS` and redeploy. Their
+  tokens stop working on the next request.
+- Changing your Happiest Baby password may also end existing sign-ins.
+
+Sign-ins last as long as Happiest Baby's login token does. When it expires, Claude
+asks you to reconnect.
+
+### Run it locally
+
+```bash
+pip install -r requirements.txt uvicorn pytest
+pytest tests                       # OAuth flow and tools, with Happiest Baby mocked
+PUBLIC_BASE_URL=http://127.0.0.1:8000 TOKEN_SECRET=... ALLOWED_EMAILS=you@example.com \
+  uvicorn api.index:app --port 8000
+```
+
+## Controlling the SNOO and logging entries
+
+`happiest-baby-actions.py` is a command-line backup for when the Happiest Baby app
+isn't working. It takes the same credential options as the exporter and needs the
+`happiest_baby/` package next to it, so run it from a clone of this repo.
+
+```bash
+./happiest-baby-actions.py snoo status
+./happiest-baby-actions.py snoo level 2 --hold     # baseline, 1, 2, 3, or 4
+./happiest-baby-actions.py snoo start
+./happiest-baby-actions.py snoo stop
+./happiest-baby-actions.py snoo white-noise on --minutes 30
+
+./happiest-baby-actions.py journal diaper --pee --poo --at 03:10 --note "blowout"
+./happiest-baby-actions.py journal recent --type breastfeeding
+./happiest-baby-actions.py journal delete <id>
+```
+
+Every change shows what it will do and asks first. Pass `--yes` (before the
+subcommand) to skip the prompt, or `--dry-run` to only show the plan. SNOO
+commands wait for the SNOO to report its new state. If it doesn't report in time,
+the script exits with code 3.
+
+How it works: SNOO commands are sent over AWS IoT MQTT (WebSocket on port 443), the
+same channel the app uses. Journal entries go to the REST API. Both are undocumented
+and were worked out by the [python-snoo](https://pypi.org/project/python-snoo/)
+project, so they may break if Happiest Baby changes them.
+
+- **Confirmed:** SNOO start, stop, level, hold, sticky white noise, and status;
+  logging diapers.
+- **Experimental:** `journal add` (feeds, pumping, solid food) and `journal delete`.
+  For `journal add`, copy the `data` object from `journal recent` for the same type
+  so the new entry looks like the app's.
 
 ## Command-Line Options
 
@@ -255,6 +365,9 @@ Fields are ordered for easy reading: baby name first, followed by time fields, t
 Dependencies are automatically managed by uv:
 - `requests>=2.32.0` - HTTP library for API calls
 - `click>=8.1.0` - Command-line interface framework
+- `paho-mqtt>=2.0.0` and `PySocks>=1.7.1` - SNOO control over MQTT (`happiest-baby-actions.py` only)
+
+The MCP server's dependencies are in `requirements.txt`.
 
 ## License
 

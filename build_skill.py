@@ -102,6 +102,9 @@ def main(email, password, output: Path, revoke_path: Path) -> None:
     with os.fdopen(fd, "wb") as f, zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.write(REPO_DIR / "skill" / "SKILL.md", f"{SKILL_NAME}/SKILL.md")
         zf.write(REPO_DIR / "happiest-baby-exporter.py", f"{SKILL_NAME}/scripts/happiest-baby-exporter.py")
+        zf.write(REPO_DIR / "happiest-baby-actions.py", f"{SKILL_NAME}/scripts/happiest-baby-actions.py")
+        for module in sorted((REPO_DIR / "happiest_baby").glob("*.py")):
+            zf.write(module, f"{SKILL_NAME}/scripts/happiest_baby/{module.name}")
         zf.writestr(f"{SKILL_NAME}/credentials.json", json.dumps(credentials, indent=2) + "\n")
 
     click.echo(f"✓ Wrote {output}")

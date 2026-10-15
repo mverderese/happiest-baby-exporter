@@ -1,13 +1,21 @@
 ---
 name: happiest-baby
-description: Pull baby tracking data (sleep, breastfeeding, bottle feeding, diapers, solid food, pumping) from the user's Happiest Baby / SNOO account and summarize it or export it as CSV. Use when the user asks about their baby's sleep, naps, feeds, diapers, or SNOO data, or asks to pull or export Happiest Baby data.
+description: Read and write the user's Happiest Baby / SNOO account. Pulls baby tracking data (sleep, breastfeeding, bottle feeding, diapers, solid food, pumping) and summarizes or exports it as CSV; controls the SNOO (start, stop, set level 1-4 or baseline, hold, sticky white noise, status); and logs or deletes journal entries such as diaper changes. Use when the user asks about their baby's sleep, naps, feeds, diapers, or SNOO data, asks to pull or export Happiest Baby data, asks to change or check the SNOO, or asks to log a diaper or feed.
 ---
 
 # Happiest Baby data
 
-This skill fetches the user's journal data from the Happiest Baby (SNOO) API using
-`scripts/happiest-baby-exporter.py` and a refresh token stored in `credentials.json`,
-both in this skill's directory.
+This skill talks to the Happiest Baby (SNOO) API with a refresh token stored in
+`credentials.json` in this skill's directory, using two scripts:
+
+- `scripts/happiest-baby-exporter.py` reads journal data (see "Reading data").
+- `scripts/happiest-baby-actions.py` controls the SNOO and writes journal entries
+  (see "Controlling the SNOO and logging entries"). The user relies on this when the
+  Happiest Baby app is not working, so be quick and clear.
+
+If this conversation has the Happiest Baby connector's tools (such as `snoo_status` and
+`log_diaper`), use those for SNOO control and logging instead of the scripts. They don't
+need code execution or network settings.
 
 ## Security rules
 
@@ -16,7 +24,7 @@ both in this skill's directory.
 - Never ask the user to type their Happiest Baby password into the chat. If
   authentication fails, tell them to rebuild the skill (see "Troubleshooting").
 
-## Running
+## Reading data
 
 1. Find this skill's directory (the one containing this SKILL.md), referred to as
    `$SKILL_DIR` below.
@@ -43,9 +51,62 @@ both in this skill's directory.
 4. Read the CSVs it wrote:
    - `journals_consolidated.csv` — every entry across types, one row each, sorted by time
      (durations in seconds, amounts in oz unless metric)
-   - `journals_sleep.csv` — one row per sleep session (`stateDuration` in seconds)
+   - `journals_sleep.csv` — one row per sleep session (`stateDuration` in seconds); `source` is
+     `snoo`, or `manual` for sleep logged in the app outside the SNOO, with its tag in `label`
+     (e.g. `in_arms`) and any `note`
    - `journals_<type>.csv` — full detail per journal type
    Types with no entries in the window produce no file.
+
+## Controlling the SNOO and logging entries
+
+Install the extra dependencies once: `pip install --quiet requests click paho-mqtt PySocks`.
+Every command below starts with:
+
+```bash
+python3 "$SKILL_DIR/scripts/happiest-baby-actions.py" \
+  --credentials-file "$SKILL_DIR/credentials.json" [--yes] <command>
+```
+
+Global options go before the command: `--yes` (skip the confirmation prompt; required
+when running non-interactively), `--dry-run` (print the plan, change nothing),
+`--timezone <IANA zone>` (default America/New_York).
+
+SNOO commands (add `--device NAME` only if the script says there is more than one SNOO):
+
+- `snoo status`: current level, hold, time left, white noise, safety clip warning
+- `snoo start`: start at baseline
+- `snoo stop`
+- `snoo level {baseline,1,2,3,4} [--hold]`: change level; `--hold` keeps it there
+- `snoo white-noise {on,off} [--minutes 15|30|60]`: sound without motion
+- `snoo devices`: list SNOOs (also shows each one's `mqtt_host`, see Troubleshooting)
+
+Journal commands (add `--baby-name NAME` only if the script asks for it):
+
+- `journal diaper --pee|--poo [--at TIME] [--note TEXT]`: confirmed to work
+- `journal recent --type TYPE [--days 2] [--limit 5]`: raw JSON of recent entries, with ids
+- `journal add --type TYPE --data JSON [--at TIME] [--end-at TIME] [--note TEXT]`:
+  EXPERIMENTAL, for feeds, pumping, and solid food. First run `journal recent` for that
+  type and copy the shape of an existing entry's `data` object exactly (field names,
+  units, nesting). If there are no existing entries to copy, tell the user you can't
+  log that type reliably yet instead of guessing.
+- `journal delete ID`: EXPERIMENTAL; get the id from `journal recent`
+
+TIME is `now` (default), `15m` or `2h` (ago), `HH:MM` (most recent such time, in the
+timezone), or ISO 8601.
+
+Rules for anything that changes the SNOO or the journal:
+
+- When the user's message fully specifies the action ("put the SNOO on level 2",
+  "log a wet diaper just now"), run it with `--yes`. If you had to infer anything
+  (which baby or SNOO, the time, pee vs. poo, the level), or the command is
+  `journal add` or `journal delete`, run it with `--dry-run` first, show the user the
+  "Plan:" line, and only run with `--yes` after they agree.
+- Never retry a write that failed or timed out without first checking state
+  (`snoo status` or `journal recent`), so the entry isn't logged twice.
+- Report the script's final line plainly ("Done. SNOO is now: LEVEL2, hold on").
+  Exit code 3 means the command was sent but the SNOO didn't confirm in time: say so,
+  and offer to check `snoo status`. Always repeat a "safety clip not attached" warning.
+- Don't change the SNOO's level or hold unless the user asked to; reading status is fine.
 
 ## Answering
 
@@ -70,3 +131,8 @@ both in this skill's directory.
   `api-us-east-1-prod.happiestbaby.com`: those domains must be allowed in the
   user's Claude settings for code execution network access. Tell the user to add
   them; do not try to work around the restriction.
+- SNOO commands failing with "Could not reach <host>", a proxy 403, or a connection
+  timeout: the SNOO's AWS IoT host (shown as `mqtt_host` by `snoo devices`, ending in
+  `.iot.us-east-1.amazonaws.com`) must also be allowed. Give the user that exact host
+  to add. "Connection closed ... the login may have been rejected" usually means the
+  token is expired; see the refresh token item above.

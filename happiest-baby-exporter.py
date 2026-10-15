@@ -8,83 +8,51 @@
 # ///
 """
 Export journal data from Happiest Baby API to CSV files.
+
+Needs the happiest_baby package that sits next to this script.
 """
 
 import csv
 import json
 import os
+import select
 import sys
 from datetime import datetime, timedelta, timezone as dt_timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import click
-import requests
 
 
-# API Configuration
-API_BASE_URL = "https://api-us-east-1-prod.happiestbaby.com"
-COGNITO_ENDPOINT = "https://cognito-idp.us-east-1.amazonaws.com/"
-CLIENT_ID = "6kqofhc8hm394ielqdkvli0oea"
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR))
 
-# API Endpoints
-BABIES_ENDPOINT = "/us/me/v10/babies"
-JOURNALS_ENDPOINT = "/cs/me/v11/babies/{baby_id}/journals/tracking"
-PUMPING_ENDPOINT = "/cs/me/v11/pumping-journals/tracking"
-SLEEP_ENDPOINT = "/ss/me/v11/babies/{baby_id}/sessions/daily"
+import happiest_baby as hb  # noqa: E402
 
 
-def _cognito_call(target: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Call a Cognito Identity Provider action, exiting with Cognito's error detail on failure."""
-    headers = {
-        "Content-Type": "application/x-amz-json-1.1",
-        "X-Amz-Target": f"AWSCognitoIdentityProviderService.{target}",
-    }
-
-    try:
-        response = requests.post(
-            COGNITO_ENDPOINT, json={**payload, "ClientId": CLIENT_ID}, headers=headers, timeout=30
-        )
-        response.raise_for_status()
-        return response.json()
-
-    except requests.exceptions.HTTPError as e:
-        click.echo(f"Error: {target} failed - {e}", err=True)
-        error_type = None
-        try:
-            error_data = e.response.json()
-            error_type = error_data.get("__type")
-            if error_type:
-                click.echo(f"  {error_type}: {error_data.get('message', '')}", err=True)
-        except ValueError:
-            pass
-        if payload.get("AuthFlow") == "REFRESH_TOKEN_AUTH" and error_type == "NotAuthorizedException":
-            click.echo("  The refresh token is expired or revoked; generate a new one with build_skill.py", err=True)
-        sys.exit(1)
-    except requests.exceptions.RequestException as e:
-        click.echo(f"Error: Network error - {e}", err=True)
-        sys.exit(1)
-
-
-def _cognito_auth(auth_flow: str, auth_parameters: Dict[str, str]) -> Dict[str, Any]:
-    """Call Cognito InitiateAuth and return the AuthenticationResult."""
-    data = _cognito_call("InitiateAuth", {"AuthFlow": auth_flow, "AuthParameters": auth_parameters})
-
-    if "AuthenticationResult" not in data:
-        click.echo("Error: Authentication failed - no token in response", err=True)
-        sys.exit(1)
-
-    return data["AuthenticationResult"]
+def _exit_on_error(e: hb.HappiestBabyError, action: str) -> None:
+    click.echo(f"Error: {action} failed - {e}", err=True)
+    sys.exit(1)
 
 
 def authenticate(email: str, password: str) -> Dict[str, Any]:
     """Authenticate with email/password; returns IdToken, RefreshToken, etc."""
-    return _cognito_auth("USER_PASSWORD_AUTH", {"USERNAME": email, "PASSWORD": password})
+    try:
+        return hb.authenticate_password(email, password)
+    except hb.HappiestBabyError as e:
+        _exit_on_error(e, "Sign-in")
 
 
 def authenticate_with_refresh_token(refresh_token: str) -> str:
     """Exchange a refresh token for a fresh IdToken."""
-    result = _cognito_auth("REFRESH_TOKEN_AUTH", {"REFRESH_TOKEN": refresh_token})
+    try:
+        result = hb.refresh_session(refresh_token)
+    except hb.AuthError as e:
+        click.echo(f"Error: Sign-in failed - {e}", err=True)
+        click.echo("  The refresh token is expired or revoked; generate a new one with build_skill.py", err=True)
+        sys.exit(1)
+    except hb.HappiestBabyError as e:
+        _exit_on_error(e, "Sign-in")
     if "RefreshToken" in result:
         # The stored token can't be updated (e.g. it's read-only inside a skill), so
         # once the old token's grace period ends, later runs will fail.
@@ -98,7 +66,10 @@ def authenticate_with_refresh_token(refresh_token: str) -> str:
 
 def revoke_refresh_token(refresh_token: str) -> None:
     """Revoke a refresh token so it can no longer be used."""
-    _cognito_call("RevokeToken", {"Token": refresh_token})
+    try:
+        hb.revoke_refresh_token(refresh_token)
+    except hb.HappiestBabyError as e:
+        _exit_on_error(e, "Revoking the refresh token")
 
 
 def refresh_token_from_json(raw: str | bytes, source: str) -> str:
@@ -123,125 +94,151 @@ def load_refresh_token(credentials_file: Path) -> str:
     return refresh_token_from_json(raw, str(credentials_file))
 
 
-def fetch_babies(token: str) -> List[Dict[str, Any]]:
-    """Fetch list of babies from API."""
-    url = f"{API_BASE_URL}{BABIES_ENDPOINT}"
-    headers = {"Authorization": f"Bearer {token}"}
-
-    try:
-        response = requests.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        click.echo(f"Error: Failed to fetch babies - {e}", err=True)
-        sys.exit(1)
-
-
 def fetch_journals(
-    baby_id: str,
-    journal_type: str,
-    from_date: datetime,
-    to_date: datetime,
-    token: str,
+    client: hb.HappiestBabyClient, baby_id: str, journal_type: str, from_date: datetime, to_date: datetime
 ) -> List[Dict[str, Any]]:
     """Fetch journals of a specific type for a date range."""
-    endpoint = JOURNALS_ENDPOINT.format(baby_id=baby_id)
-
-    params = {
-        "fromDateTime": from_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "toDateTime": to_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "journalType": journal_type,
-    }
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-    }
-
-    url = f"{API_BASE_URL}{endpoint}"
     click.echo(f"Fetching {journal_type} journals from {from_date.date()} to {to_date.date()}...")
-
-    response = requests.get(url, params=params, headers=headers, timeout=30)
-    response.raise_for_status()
-
-    data = response.json()
+    data = client.journals(baby_id, journal_type, from_date, to_date)
     click.echo(f"  Retrieved {len(data)} entries")
     return data
 
 
-def fetch_pumping_journals(
-    from_date: datetime,
-    to_date: datetime,
-    token: str,
-) -> List[Dict[str, Any]]:
+def fetch_pumping_journals(client: hb.HappiestBabyClient, from_date: datetime, to_date: datetime) -> List[Dict[str, Any]]:
     """Fetch pumping journals for a date range."""
-
-    params = {
-        "fromDateTime": from_date.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-        "toDateTime": to_date.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-    }
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-    }
-
-    url = f"{API_BASE_URL}{PUMPING_ENDPOINT}"
     click.echo(f"Fetching pumping journals from {from_date.date()} to {to_date.date()}...")
-
-    response = requests.get(url, params=params, headers=headers, timeout=30)
-    response.raise_for_status()
-
-    data = response.json()
+    data = client.pumping_journals(from_date, to_date)
     click.echo(f"  Retrieved {len(data)} entries")
     return data
 
 
 def fetch_sleep_sessions(
-    baby_id: str,
-    from_date: datetime,
-    to_date: datetime,
-    token: str,
-    timezone: str = "America/New_York",
-) -> List[Dict[str, Any]]:
-    """Fetch sleep sessions for a date range."""
-    endpoint = SLEEP_ENDPOINT.format(baby_id=baby_id)
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-    }
-
-    url = f"{API_BASE_URL}{endpoint}"
+    client: hb.HappiestBabyClient, baby_id: str, from_date: datetime, to_date: datetime, timezone: str
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Fetch sleep for a date range: the raw per-level rows, and one consolidated row per session."""
     click.echo(f"Fetching sleep sessions from {from_date.date()} to {to_date.date()}...")
+    levels, detailed = client.sleep_levels(baby_id, from_date, to_date, timezone)
+    click.echo(f"  Retrieved {len(levels)} entries")
+    return levels, consolidate_sleep_sessions(hb.consolidate_sleep_levels(levels, detailed))
 
-    all_sessions = []
-    current_date = from_date.replace(hour=6, minute=0, second=0, microsecond=0)
 
-    # The API fetches sessions per day, so iterate through each day
-    while current_date.date() <= to_date.date():
-        params = {
-            "detailedLevels": "true",
-            "levels": "true",
-            "startTime": current_date.strftime("%Y-%m-%d %H:%M:%S.000"),
-            "timezone": timezone,
-        }
+def consolidate_sleep_sessions(sessions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One CSV row per session: start, total seconds, the states it went through, and its source."""
+    rows = []
+    for session in sessions:
+        start = session["startTime"]  # e.g. 2026-10-12T14:50:00-0400
+        rows.append({
+            "sessionId": session["sessionId"],
+            "startTime": f"{start[:10]} {start[11:19]}",
+            "startTimeFormatted": start,
+            "stateDuration": session["totalSeconds"],
+            "type": ",".join(session["secondsByType"]),
+            "source": session["source"],
+            "label": session.get("label", ""),
+            "note": session.get("note", ""),
+        })
+    return rows
 
-        response = requests.get(url, params=params, headers=headers, timeout=30)
-        response.raise_for_status()
 
-        data = response.json()
+def get_id_token(
+    email: Optional[str],
+    password: Optional[str],
+    refresh_token: Optional[str],
+    credentials_file: Optional[Path],
+) -> str:
+    """Authenticate from whichever credentials were given and return an IdToken."""
+    if refresh_token and credentials_file:
+        click.echo(
+            "Error: Both a refresh token (--refresh-token / HAPPIESTBABY_REFRESH_TOKEN) and "
+            "--credentials-file were given; use only one",
+            err=True,
+        )
+        sys.exit(1)
 
-        # The API returns a dict with 'levels' containing the actual session list
-        if isinstance(data, dict) and 'levels' in data:
-            sessions = data['levels']
-        elif isinstance(data, list):
-            sessions = data
-        else:
-            sessions = []
+    # Progress goes to stderr so callers printing JSON (happiest-baby-actions.py) keep stdout clean
+    click.echo("Authenticating with Happiest Baby...", err=True)
+    if credentials_file:
+        click.echo(f"  Using refresh token from {credentials_file}", err=True)
+        token = authenticate_with_refresh_token(load_refresh_token(credentials_file))
+    elif refresh_token:
+        click.echo("  Using refresh token from --refresh-token / HAPPIESTBABY_REFRESH_TOKEN", err=True)
+        token = authenticate_with_refresh_token(refresh_token)
+    else:
+        no_credentials = (
+            "Error: No credentials provided; pass --credentials-file, --refresh-token, "
+            "or --email and --password"
+        )
+        # Prompt on a terminal, or read answers piped to stdin; fail fast if nothing can answer
+        if not (email and password) and not sys.stdin.isatty() and not _stdin_has_data():
+            click.echo(no_credentials, err=True)
+            sys.exit(1)
+        try:
+            email = email or click.prompt("Email", err=True)
+            password = password or click.prompt("Password", hide_input=True, err=True)
+        except click.Abort:  # stdin ended before both answers
+            click.echo(f"\n{no_credentials}", err=True)
+            sys.exit(1)
+        token = authenticate(email, password)["IdToken"]
+    click.echo("✓ Authentication successful", err=True)
+    return token
 
-        all_sessions.extend(sessions)
-        current_date += timedelta(days=1)
 
-    click.echo(f"  Retrieved {len(all_sessions)} entries")
-    return all_sessions
+def _stdin_has_data(wait: float = 1.0) -> bool:
+    """Whether non-terminal stdin has input (or EOF) to read, waiting briefly for a pipe to fill."""
+    try:
+        return bool(select.select([sys.stdin], [], [], wait)[0])
+    except (OSError, ValueError):  # e.g. Windows, where select() doesn't take pipes
+        return False
+
+
+def select_baby(client: hb.HappiestBabyClient, baby_name: Optional[str]) -> Dict[str, Any]:
+    """Pick a baby by name, the only baby, or an interactive choice; exits if ambiguous."""
+    click.echo("Fetching babies from API...")
+    try:
+        babies = client.babies()
+    except hb.HappiestBabyError as e:
+        _exit_on_error(e, "Fetching babies")
+
+    if not babies:
+        click.echo("Error: No babies found in your account", err=True)
+        sys.exit(1)
+
+    if baby_name is not None:
+        # Find baby by name
+        matching_babies = [b for b in babies if b.get("babyName", "").lower() == baby_name.lower()]
+
+        if not matching_babies:
+            click.echo(f"Error: No baby found with name '{baby_name}'", err=True)
+            click.echo("Available babies:", err=True)
+            for baby in babies:
+                click.echo(f"  - {baby.get('babyName', 'Unknown')}", err=True)
+            sys.exit(1)
+
+        baby = matching_babies[0]
+        click.echo(f"✓ Using baby: {baby.get('babyName', 'Unknown')}")
+    elif len(babies) == 1:
+        baby = babies[0]
+        click.echo(f"✓ Using baby: {baby.get('babyName', 'Unknown')}")
+    elif not sys.stdin.isatty():
+        click.echo("Error: Multiple babies found; pass --baby-name with one of:", err=True)
+        for baby in babies:
+            click.echo(f"  - {baby.get('babyName', 'Unknown')}", err=True)
+        sys.exit(1)
+    else:
+        click.echo(f"Found {len(babies)} babies:")
+        for i, baby in enumerate(babies, 1):
+            name = baby.get("babyName", "Unknown")
+            click.echo(f"  {i}. {name}")
+
+        choice = click.prompt("Select baby number", type=int)
+        if choice < 1 or choice > len(babies):
+            click.echo("Error: Invalid selection", err=True)
+            sys.exit(1)
+
+        baby = babies[choice - 1]
+        click.echo(f"✓ Selected baby: {baby.get('babyName', 'Unknown')}")
+
+    return baby
 
 
 def flatten_dict(d: Dict[str, Any], parent_key: str = "", sep: str = "_", preserve_lists: bool = False) -> Dict[str, Any]:
@@ -378,68 +375,6 @@ def export_to_csv(
         writer.writerows(cleaned)
 
     click.echo(f"  Exported to {output_file}")
-
-
-def consolidate_sleep_sessions(sleep_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Consolidate sleep entries by sessionId."""
-    from collections import defaultdict
-    from datetime import datetime as dt
-
-    sessions = defaultdict(list)
-
-    # Group by sessionId
-    for entry in sleep_entries:
-        session_id = entry.get("sessionId")
-        if session_id:
-            sessions[session_id].append(entry)
-
-    consolidated = []
-
-    for session_id, entries in sessions.items():
-        # Find earliest start time
-        start_times = []
-        for entry in entries:
-            start_time = entry.get("startTime")
-            if start_time:
-                try:
-                    # Parse the time string
-                    parsed_time = dt.strptime(start_time, "%Y-%m-%d %H:%M:%S.%f")
-                    start_times.append((parsed_time, start_time))
-                except:
-                    start_times.append((dt.max, start_time))
-
-        if not start_times:
-            continue
-
-        earliest_time = min(start_times)[1]
-
-        # Sum durations
-        total_duration = sum(
-            entry.get("stateDuration", 0)
-            for entry in entries
-            if isinstance(entry.get("stateDuration"), (int, float))
-        )
-
-        # Get distinct types (sorted)
-        types = sorted(set(
-            entry.get("type")
-            for entry in entries
-            if entry.get("type")
-        ))
-        types_str = ",".join(types)
-
-        # Create consolidated entry with fields from first entry
-        consolidated_entry = entries[0].copy()
-        consolidated_entry["startTime"] = earliest_time
-        consolidated_entry["stateDuration"] = total_duration
-        consolidated_entry["type"] = types_str
-
-        consolidated.append(consolidated_entry)
-
-    # Sort by start time
-    consolidated.sort(key=lambda x: x.get("startTime", ""))
-
-    return consolidated
 
 
 def create_consolidated_entry(
@@ -629,34 +564,7 @@ def main(
     Each journal type will be exported to a separate CSV file named
     'journals_<type>.csv' in the output directory.
     """
-    # Authenticate
-    if refresh_token and credentials_file:
-        click.echo(
-            "Error: Both a refresh token (--refresh-token / HAPPIESTBABY_REFRESH_TOKEN) and "
-            "--credentials-file were given; use only one",
-            err=True,
-        )
-        sys.exit(1)
-
-    click.echo("Authenticating with Happiest Baby...")
-    if credentials_file:
-        click.echo(f"  Using refresh token from {credentials_file}")
-        token = authenticate_with_refresh_token(load_refresh_token(credentials_file))
-    elif refresh_token:
-        click.echo("  Using refresh token from --refresh-token / HAPPIESTBABY_REFRESH_TOKEN")
-        token = authenticate_with_refresh_token(refresh_token)
-    else:
-        if not (email and password) and not sys.stdin.isatty():
-            click.echo(
-                "Error: No credentials provided; pass --credentials-file, --refresh-token, "
-                "or --email and --password",
-                err=True,
-            )
-            sys.exit(1)
-        email = email or click.prompt("Email")
-        password = password or click.prompt("Password", hide_input=True)
-        token = authenticate(email, password)["IdToken"]
-    click.echo("✓ Authentication successful")
+    client = hb.HappiestBabyClient(get_id_token(email, password, refresh_token, credentials_file))
     click.echo()
 
     # Determine journal types to export
@@ -680,50 +588,9 @@ def main(
     selected_baby_name = None
 
     if needs_baby_id:
-        click.echo("Fetching babies from API...")
-        babies = fetch_babies(token)
-
-        if not babies:
-            click.echo("Error: No babies found in your account", err=True)
-            sys.exit(1)
-
-        if baby_name is not None:
-            # Find baby by name
-            matching_babies = [b for b in babies if b.get("babyName", "").lower() == baby_name.lower()]
-
-            if not matching_babies:
-                click.echo(f"Error: No baby found with name '{baby_name}'", err=True)
-                click.echo("Available babies:", err=True)
-                for baby in babies:
-                    click.echo(f"  - {baby.get('babyName', 'Unknown')}", err=True)
-                sys.exit(1)
-
-            baby_id = matching_babies[0]["_id"]
-            selected_baby_name = matching_babies[0].get("babyName", "Unknown")
-            click.echo(f"✓ Using baby: {selected_baby_name}")
-        elif len(babies) == 1:
-            baby_id = babies[0]["_id"]
-            selected_baby_name = babies[0].get("babyName", "Unknown")
-            click.echo(f"✓ Using baby: {selected_baby_name}")
-        elif not sys.stdin.isatty():
-            click.echo("Error: Multiple babies found; pass --baby-name with one of:", err=True)
-            for baby in babies:
-                click.echo(f"  - {baby.get('babyName', 'Unknown')}", err=True)
-            sys.exit(1)
-        else:
-            click.echo(f"Found {len(babies)} babies:")
-            for i, baby in enumerate(babies, 1):
-                name = baby.get("babyName", "Unknown")
-                click.echo(f"  {i}. {name}")
-
-            choice = click.prompt("Select baby number", type=int)
-            if choice < 1 or choice > len(babies):
-                click.echo("Error: Invalid selection", err=True)
-                sys.exit(1)
-
-            baby_id = babies[choice - 1]["_id"]
-            selected_baby_name = babies[choice - 1].get("babyName", "Unknown")
-            click.echo(f"✓ Selected baby: {selected_baby_name}")
+        baby = select_baby(client, baby_name)
+        baby_id = baby["_id"]
+        selected_baby_name = baby.get("babyName", "Unknown")
 
     click.echo()
 
@@ -749,26 +616,24 @@ def main(
     # Export each journal type
     for jtype in journal_types:
         try:
-            if jtype == "pumping":
-                journals = fetch_pumping_journals(from_date, to_date, token)
-            elif jtype == "sleep":
-                journals = fetch_sleep_sessions(baby_id, from_date, to_date, token, timezone)
-            else:
-                journals = fetch_journals(baby_id, jtype, from_date, to_date, token)
-
             if jtype == "sleep":
+                levels, consolidated = fetch_sleep_sessions(client, baby_id, from_date, to_date, timezone)
+
                 # Export detailed sleep data
                 detailed_output = output_dir / "journals_sleep_detailed.csv"
-                export_to_csv(journals, str(detailed_output), jtype, units, baby_id, selected_baby_name)
+                export_to_csv(levels, str(detailed_output), jtype, units, baby_id, selected_baby_name)
 
                 # Export consolidated sleep data
                 consolidated_output = output_dir / "journals_sleep.csv"
-                consolidated = consolidate_sleep_sessions(journals)
                 export_to_csv(consolidated, str(consolidated_output), jtype, units, baby_id, selected_baby_name)
 
                 # Store consolidated sleep for all-journals export
                 all_journals["sleep"] = consolidated
             else:
+                if jtype == "pumping":
+                    journals = fetch_pumping_journals(client, from_date, to_date)
+                else:
+                    journals = fetch_journals(client, baby_id, jtype, from_date, to_date)
                 output_file = output_dir / f"journals_{jtype}.csv"
                 export_to_csv(journals, str(output_file), jtype, units, baby_id, selected_baby_name)
 
@@ -777,7 +642,7 @@ def main(
                     all_journals[jtype] = journals
 
             click.echo()
-        except requests.exceptions.HTTPError as e:
+        except hb.HappiestBabyError as e:
             click.echo(f"  Error fetching {jtype}: {e}", err=True)
             click.echo()
         except Exception as e:
