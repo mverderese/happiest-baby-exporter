@@ -11,9 +11,9 @@ Accounts that use two-factor sign-in aren't supported.
 
 ## Add it to Claude
 
-1. Go to [claude.ai](https://claude.ai) in a browser (on a phone or a computer) and open
-   **Settings → Connectors → Add custom connector**. Custom connectors can't be added from
-   the mobile app, but once added they show up there too.
+1. In the Claude app (iPhone, Android, or desktop) or at [claude.ai](https://claude.ai), open
+   **Settings → Connectors → Add custom connector**. Once added, it's available on all your
+   devices.
 2. Name it **Happiest Baby** and paste the connector URL. Leave the OAuth client ID and
    secret empty.
 3. Click **Connect**. On the page that opens:
