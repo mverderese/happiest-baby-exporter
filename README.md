@@ -184,7 +184,8 @@ When you connect, Claude sends you to the server's own sign-in page, where you e
 your Happiest Baby email and password. The server signs in to Happiest Baby once and
 then forgets the password. It keeps nothing on disk and has no database: the tokens it
 gives Claude are encrypted with your `TOKEN_SECRET`, and they carry the Happiest Baby
-login token inside them. Only email addresses listed in `ALLOWED_EMAILS` can sign in.
+login token inside them. Anyone with a Happiest Baby account can sign in, and each
+person's connection only reaches their own account.
 
 ### 1. Deploy to Vercel
 
@@ -196,7 +197,6 @@ login token inside them. Only email addresses listed in `ALLOWED_EMAILS` can sig
    | Variable | Value |
    | - | - |
    | `TOKEN_SECRET` | Output of `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
-   | `ALLOWED_EMAILS` | Your Happiest Baby email (comma-separate to allow a partner's account too) |
    | `DEFAULT_TIMEZONE` | Optional, e.g. `America/Chicago` (default `America/New_York`). Prefills the sign-in page's time zone field when the browser doesn't report one |
    | `PUBLIC_BASE_URL` | Optional. Defaults to your production URL (`https://<project>.vercel.app`). Set it if you use a custom domain |
 
@@ -218,6 +218,8 @@ the server.
    To change it, disconnect and connect again.
 
 Like skills, connectors belong to your account, so it also works in the Claude mobile apps.
+[docs/claude-connector.md](docs/claude-connector.md) is a step-by-step guide you can share
+with anyone who'll connect to your server.
 For Claude Code: `claude mcp add --transport http happiest-baby https://<project>.vercel.app/mcp`.
 
 ### Disconnecting and revoking
@@ -225,8 +227,6 @@ For Claude Code: `claude mcp add --transport http happiest-baby https://<project
 - **One device or connection:** disconnect the connector in Claude.
 - **Everything at once:** change `TOKEN_SECRET` in Vercel and redeploy. Every token
   the server has issued stops working, and you sign in again on next use.
-- **Remove a person:** take their email out of `ALLOWED_EMAILS` and redeploy. Their
-  tokens stop working on the next request.
 - Changing your Happiest Baby password may also end existing sign-ins.
 
 Sign-ins last as long as Happiest Baby's login token does. When it expires, Claude
@@ -237,7 +237,7 @@ asks you to reconnect.
 ```bash
 pip install -r requirements.txt uvicorn pytest
 pytest tests                       # OAuth flow and tools, with Happiest Baby mocked
-PUBLIC_BASE_URL=http://127.0.0.1:8000 TOKEN_SECRET=... ALLOWED_EMAILS=you@example.com \
+PUBLIC_BASE_URL=http://127.0.0.1:8000 TOKEN_SECRET=... \
   uvicorn api.index:app --port 8000
 ```
 

@@ -10,6 +10,8 @@ redirects back to Claude. The token endpoint turns that into:
 - a refresh token holding the Happiest Baby refresh token (used to mint new IdTokens).
 
 The password is used once and never stored. Nothing is stored server-side; see sealing.py.
+Anyone with a Happiest Baby account can sign in; each person's tokens only reach their own
+account.
 The time zone chosen on the sign-in page (prefilled from the browser) travels in every
 token too, as that user's default for reading and writing times.
 
@@ -163,8 +165,6 @@ class StatelessOAuthProvider:
         data = self.sealer.open("refresh", refresh_token)
         if not data or data["cid"] != fingerprint(client.client_id):
             return None
-        if not self.settings.email_allowed(data["email"]):
-            return None
         return HBRefreshToken(
             token=refresh_token,
             client_id=client.client_id,
@@ -188,8 +188,6 @@ class StatelessOAuthProvider:
         self, client: OAuthClientInformationFull, hb_refresh_token: str, email: str,
         scopes: List[str], resource: Optional[str], tz: Optional[str],
     ) -> OAuthToken:
-        if not self.settings.email_allowed(email):
-            raise TokenError("invalid_grant", "This account is no longer allowed on this server")
         try:
             session = await anyio.to_thread.run_sync(hb.refresh_session, hb_refresh_token)
         except hb.AuthError:
@@ -218,7 +216,7 @@ class StatelessOAuthProvider:
 
     async def load_access_token(self, token: str) -> Optional[HBAccessToken]:
         data = self.sealer.open("access", token)
-        if not data or not self.settings.email_allowed(data["email"]):
+        if not data:
             return None
         return HBAccessToken(
             token=token,
@@ -270,17 +268,10 @@ class StatelessOAuthProvider:
             return retry("Enter your email and password.")
         if not valid_timezone(tz):
             return retry("Enter a time zone name like America/Chicago or Europe/London.")
-        if not self.settings.allowed_emails:
-            return retry("This server has no allowed accounts yet. Set ALLOWED_EMAILS in its environment.")
-        # Check the allowlist before contacting Cognito, so the server can't be used to test passwords.
-        # Both failures share one message so the page doesn't reveal which emails are allowed.
-        rejected = "Email or password is incorrect, or this account isn't allowed on this server."
-        if not self.settings.email_allowed(email):
-            return retry(rejected)
         try:
             result = await anyio.to_thread.run_sync(hb.authenticate_password, email, password)
         except hb.AuthError:
-            return retry(rejected)
+            return retry("Email or password is incorrect.")
         except hb.HappiestBabyError:
             return retry("Couldn't reach Happiest Baby. Try again in a minute.")
 

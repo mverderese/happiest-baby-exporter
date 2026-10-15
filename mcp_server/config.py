@@ -2,7 +2,7 @@
 
 import os
 from dataclasses import dataclass
-from typing import FrozenSet, List
+from typing import List
 from zoneinfo import ZoneInfo
 
 
@@ -14,7 +14,6 @@ class ConfigError(RuntimeError):
 class Settings:
     base_url: str
     token_secrets: List[str]
-    allowed_emails: FrozenSet[str]
     default_timezone: str
     allow_loopback_redirects: bool
 
@@ -44,20 +43,12 @@ class Settings:
                 "python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
             )
 
-        allowed = frozenset(
-            e.strip().lower() for e in os.environ.get("ALLOWED_EMAILS", "").split(",") if e.strip()
-        )
-
         tz = os.environ.get("DEFAULT_TIMEZONE", "America/New_York")
         ZoneInfo(tz)  # fail fast on a typo
 
         return cls(
             base_url=base_url,
             token_secrets=secrets,
-            allowed_emails=allowed,
             default_timezone=tz,
             allow_loopback_redirects=os.environ.get("ALLOW_LOOPBACK_REDIRECTS", "true").lower() != "false",
         )
-
-    def email_allowed(self, email: str) -> bool:
-        return email.strip().lower() in self.allowed_emails
