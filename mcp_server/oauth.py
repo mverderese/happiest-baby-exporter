@@ -10,6 +10,8 @@ redirects back to Claude. The token endpoint turns that into:
 - a refresh token holding the Happiest Baby refresh token (used to mint new IdTokens).
 
 The password is used once and never stored. Nothing is stored server-side; see sealing.py.
+The time zone chosen on the sign-in page (prefilled from the browser) travels in every
+token too, as that user's default for reading and writing times.
 
 Limits of being stateless: an authorization code can be replayed until it expires
 (5 minutes, and only together with the PKCE verifier), and an old refresh token keeps
@@ -17,9 +19,12 @@ working after rotation. Revoking a refresh token revokes its Happiest Baby refre
 token at Cognito, which ends every token derived from that sign-in.
 """
 
+import base64
+import hashlib
 import html
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import anyio.to_thread
 from mcp.server.auth.provider import (
@@ -55,14 +60,25 @@ CLAUDE_CALLBACKS = {
 
 class HBAuthorizationCode(AuthorizationCode):
     hb_refresh_token: str
+    timezone: Optional[str] = None
 
 
 class HBRefreshToken(RefreshToken):
     hb_refresh_token: str
+    timezone: Optional[str] = None
 
 
 class HBAccessToken(AccessToken):
     id_token: str
+    timezone: Optional[str] = None
+
+
+def valid_timezone(name: str) -> bool:
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return False
+    return True
 
 
 def redirect_uri_allowed(uri: str, allow_loopback: bool) -> bool:
@@ -130,6 +146,7 @@ class StatelessOAuthProvider:
             resource=data.get("resource"),
             subject=data["email"],
             hb_refresh_token=data["hb_rt"],
+            timezone=data.get("tz"),
         )
 
     async def exchange_authorization_code(
@@ -137,7 +154,7 @@ class StatelessOAuthProvider:
     ) -> OAuthToken:
         return await self._issue_tokens(
             client, authorization_code.hb_refresh_token, authorization_code.subject or "",
-            authorization_code.scopes, authorization_code.resource,
+            authorization_code.scopes, authorization_code.resource, authorization_code.timezone,
         )
 
     # --- Refresh -----------------------------------------------------------------------
@@ -156,6 +173,7 @@ class StatelessOAuthProvider:
             resource=data.get("resource"),
             subject=data["email"],
             hb_refresh_token=data["hb_rt"],
+            timezone=data.get("tz"),
         )
 
     async def exchange_refresh_token(
@@ -163,12 +181,12 @@ class StatelessOAuthProvider:
     ) -> OAuthToken:
         return await self._issue_tokens(
             client, refresh_token.hb_refresh_token, refresh_token.subject or "",
-            scopes or refresh_token.scopes, refresh_token.resource,
+            scopes or refresh_token.scopes, refresh_token.resource, refresh_token.timezone,
         )
 
     async def _issue_tokens(
         self, client: OAuthClientInformationFull, hb_refresh_token: str, email: str,
-        scopes: List[str], resource: Optional[str],
+        scopes: List[str], resource: Optional[str], tz: Optional[str],
     ) -> OAuthToken:
         if not self.settings.email_allowed(email):
             raise TokenError("invalid_grant", "This account is no longer allowed on this server")
@@ -183,7 +201,8 @@ class StatelessOAuthProvider:
         hb_refresh_token = session.get("RefreshToken") or hb_refresh_token  # if Cognito rotated it
         id_token_ttl = int(session.get("ExpiresIn", 3600))
         access_ttl = max(60, min(ACCESS_TTL_MAX, id_token_ttl - 300))
-        common = {"cid": fingerprint(client.client_id), "email": email, "scopes": scopes, "resource": resource}
+        common = {"cid": fingerprint(client.client_id), "email": email, "scopes": scopes, "resource": resource,
+                  "tz": tz}
 
         access = self.sealer.seal("access", {**common, "idt": session["IdToken"]}, ttl=access_ttl)
         refresh = self.sealer.seal("refresh", {**common, "hb_rt": hb_refresh_token}, ttl=REFRESH_TTL)
@@ -209,6 +228,7 @@ class StatelessOAuthProvider:
             resource=data.get("resource"),
             subject=data["email"],
             id_token=data["idt"],
+            timezone=data.get("tz"),
         )
 
     async def revoke_token(self, token: Any) -> None:
@@ -241,20 +261,26 @@ class StatelessOAuthProvider:
 
         email = form.get("email", "").strip()
         password = form.get("password", "")
+        tz = form.get("timezone", "").strip() or self.settings.default_timezone
+
+        def retry(error: str) -> Response:
+            return self._login_form(req, pending, email, error, tz)
+
         if not email or not password:
-            return self._login_form(req, pending, email, "Enter your email and password.")
+            return retry("Enter your email and password.")
+        if not valid_timezone(tz):
+            return retry("Enter a time zone name like America/Chicago or Europe/London.")
         if not self.settings.allowed_emails:
-            return self._login_form(req, pending, email, "This server has no allowed accounts yet. "
-                                    "Set ALLOWED_EMAILS in its environment.")
+            return retry("This server has no allowed accounts yet. Set ALLOWED_EMAILS in its environment.")
         # Check the allowlist before contacting Cognito, so the server can't be used to test passwords
         if not self.settings.email_allowed(email):
-            return self._login_form(req, pending, email, "This account isn't allowed on this server.")
+            return retry("This account isn't allowed on this server.")
         try:
             result = await anyio.to_thread.run_sync(hb.authenticate_password, email, password)
         except hb.AuthError:
-            return self._login_form(req, pending, email, "Email or password is incorrect.")
+            return retry("Email or password is incorrect.")
         except hb.HappiestBabyError:
-            return self._login_form(req, pending, email, "Couldn't reach Happiest Baby. Try again in a minute.")
+            return retry("Couldn't reach Happiest Baby. Try again in a minute.")
 
         code = self.sealer.seal("code", {
             "cid": pending["cid"],
@@ -265,11 +291,14 @@ class StatelessOAuthProvider:
             "resource": pending.get("resource"),
             "email": email.lower(),
             "hb_rt": result["RefreshToken"],
+            "tz": tz,
         }, ttl=CODE_TTL)
         target = construct_redirect_uri(pending["redirect_uri"], code=code, state=pending.get("state"))
         return RedirectResponse(target, status_code=302, headers=_SECURITY_HEADERS)
 
-    def _login_form(self, req: str, pending: Dict[str, Any], email: str = "", error: str = "") -> Response:
+    def _login_form(
+        self, req: str, pending: Dict[str, Any], email: str = "", error: str = "", tz: str = ""
+    ) -> Response:
         host = urlparse(pending["redirect_uri"]).netloc or pending["redirect_uri"]
         loopback = host.split(":")[0] in ("localhost", "127.0.0.1")
         warning = (
@@ -287,17 +316,27 @@ write your baby's journal. You'll be sent back to <strong>{html.escape(host)}</s
   <label>Happiest Baby email<input name=email type=email autocomplete=username required
     value="{html.escape(email)}"></label>
   <label>Password<input name=password type=password autocomplete=current-password required></label>
+  <label>Time zone<input id=tz name=timezone required autocapitalize=off spellcheck=false
+    value="{html.escape(tz or self.settings.default_timezone)}"{' data-keep' if tz else ''}></label>
   <button type=submit>Sign in and allow</button>
 </form>
-<p class=small>Your password is sent to Happiest Baby once to sign in and is never stored.</p>"""
+<script>{_TZ_SCRIPT}</script>
+<p class=small>Your password is sent to Happiest Baby once to sign in and is never stored. Times you
+give Claude, like "10:30", are read in this time zone unless you say otherwise.</p>"""
         return _page("Connect your SNOO", body, status=400 if error else 200)
 
+
+# Prefills the time zone field from the browser, unless the user already typed one
+_TZ_SCRIPT = ("const f=document.getElementById('tz');"
+              "if(!f.hasAttribute('data-keep')){try{f.value=Intl.DateTimeFormat().resolvedOptions().timeZone||f.value}"
+              "catch(e){}}")
+_TZ_SCRIPT_HASH = base64.b64encode(hashlib.sha256(_TZ_SCRIPT.encode()).digest()).decode()
 
 _SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "X-Frame-Options": "DENY",
     # form-action also governs the redirect after sign-in, to Claude or a Claude Code loopback port
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; "
+    "Content-Security-Policy": f"default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-{_TZ_SCRIPT_HASH}'; "
                                "form-action 'self' https: http://localhost:* http://127.0.0.1:*; "
                                "frame-ancestors 'none'",
     "Referrer-Policy": "no-referrer",

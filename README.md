@@ -206,7 +206,7 @@ login token inside them. Only email addresses listed in `ALLOWED_EMAILS` can sig
    | - | - |
    | `TOKEN_SECRET` | Output of `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
    | `ALLOWED_EMAILS` | Your Happiest Baby email (comma-separate to allow a partner's account too) |
-   | `DEFAULT_TIMEZONE` | Optional, e.g. `America/Chicago` (default `America/New_York`) |
+   | `DEFAULT_TIMEZONE` | Optional, e.g. `America/Chicago` (default `America/New_York`). Prefills the sign-in page's time zone field when the browser doesn't report one |
    | `PUBLIC_BASE_URL` | Optional. Defaults to your production URL (`https://<project>.vercel.app`). Set it if you use a custom domain |
 
 3. Deploy, then open `https://<project>.vercel.app/` in a browser. You should see a
@@ -222,6 +222,9 @@ the server.
 2. Name it "Happiest Baby" and enter `https://<project>.vercel.app/mcp`. Leave the
    OAuth client ID and secret empty, since Claude registers itself.
 3. Click **Connect**, sign in with your Happiest Baby account, and you're sent back to Claude.
+   The sign-in page also asks for your time zone, prefilled from your browser. Times
+   like "10:30" are read in that zone, so each person who signs in can use their own.
+   To change it, disconnect and connect again.
 
 Like skills, connectors belong to your account, so it also works in the Claude mobile apps.
 For Claude Code: `claude mcp add --transport http happiest-baby https://<project>.vercel.app/mcp`.

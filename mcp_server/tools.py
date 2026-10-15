@@ -25,11 +25,12 @@ be brief and state the outcome plainly ("SNOO is now: LEVEL2, hold on").
   the shape of an existing entry's "data" object exactly. If there are none to copy, say
   you can't log that type reliably yet instead of guessing.
 - Times: prefer ISO 8601 with the user's UTC offset. "now", "15m", "2h", and "HH:MM" are
-  also accepted and read in the timezone argument (the server default if omitted).
+  also accepted and read in timezone_name, which defaults to the time zone the user chose
+  when connecting. Pass timezone_name only if they say they're somewhere else.
 """
 
 mcp = MCPServer(name="Happiest Baby", instructions=INSTRUCTIONS)
-DEFAULT_TIMEZONE = "America/New_York"  # replaced from Settings in app.py
+DEFAULT_TIMEZONE = "America/New_York"  # replaced from Settings in app.py; used when a token has no time zone
 
 READ = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
 SNOO_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True)
@@ -50,8 +51,10 @@ def _client() -> hb.HappiestBabyClient:
 
 
 def _tz(name: Optional[str]) -> ZoneInfo:
+    """The named zone, else the one the user chose when signing in, else the server default."""
+    name = name or getattr(get_access_token(), "timezone", None) or DEFAULT_TIMEZONE
     try:
-        return ZoneInfo(name or DEFAULT_TIMEZONE)
+        return ZoneInfo(name)
     except (ZoneInfoNotFoundError, ValueError):
         raise ToolError(f"Unknown timezone '{name}'; use an IANA name like America/Chicago") from None
 

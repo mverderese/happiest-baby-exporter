@@ -113,7 +113,7 @@ def register(client, redirect=CALLBACK):
     })
 
 
-def sign_in(client, email=EMAIL, password=PASSWORD):
+def sign_in(client, email=EMAIL, password=PASSWORD, tz=None):
     """Run register -> authorize -> login; return (client_id, verifier, login response)."""
     client_id = register(client).json()["client_id"]
     verifier, challenge = pkce()
@@ -129,12 +129,15 @@ def sign_in(client, email=EMAIL, password=PASSWORD):
     form = client.get(f"/login?req={req}")
     assert form.status_code == 200 and "claude.ai" in form.text and "Claude" in form.text
 
-    r = client.post("/login", data={"req": req, "email": email, "password": password}, follow_redirects=False)
+    data = {"req": req, "email": email, "password": password}
+    if tz is not None:
+        data["timezone"] = tz
+    r = client.post("/login", data=data, follow_redirects=False)
     return client_id, verifier, r
 
 
-def get_tokens(client):
-    client_id, verifier, r = sign_in(client)
+def get_tokens(client, tz=None):
+    client_id, verifier, r = sign_in(client, tz=tz)
     assert r.status_code == 302, r.text
     back = urlparse(r.headers["location"])
     assert f"{back.scheme}://{back.netloc}{back.path}" == CALLBACK
@@ -213,6 +216,15 @@ def test_wrong_password_and_unlisted_email(client, fake):
     assert r.status_code == 400 and "isn&#x27;t allowed" in r.text
 
 
+def test_sign_in_page_prefills_time_zone_and_rejects_unknown(client):
+    _, _, r = sign_in(client, tz="Mars/Olympus_Mons")
+    assert r.status_code == 400 and "time zone" in r.text and 'value="Mars/Olympus_Mons" data-keep' in r.text
+    # The inline script that reads the browser's zone is the only script the CSP allows
+    script = r.text.split("<script>")[1].split("</script>")[0]
+    digest = base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
+    assert f"script-src 'sha256-{digest}'" in r.headers["content-security-policy"]
+
+
 def test_code_requires_pkce_verifier(client):
     client_id, _, r = sign_in(client)
     code = parse_qs(urlparse(r.headers["location"]).query)["code"][0]
@@ -264,6 +276,21 @@ def test_tools_end_to_end(client, fake):
 
     result = call_tool(client, token, "get_journal_entries", {"journal_type": "diaper"})
     assert not result.get("isError"), result
+
+
+def test_time_zone_from_sign_in_survives_refresh(client, fake):
+    client_id, tokens = get_tokens(client, tz="America/Los_Angeles")
+    r = client.post("/token", data={
+        "grant_type": "refresh_token", "refresh_token": tokens["refresh_token"], "client_id": client_id,
+    })
+    token = r.json()["access_token"]
+    result = call_tool(client, token, "log_diaper", {"pee": True, "poo": False, "time": "2026-10-14T03:10:00"})
+    assert not result.get("isError"), result
+    assert fake.created[-1]["startTime"] == "2026-10-14T03:10:00.000-07:00"
+    # An explicit timezone_name still wins
+    call_tool(client, token, "log_diaper",
+              {"pee": True, "poo": False, "time": "2026-10-14T03:10:00", "timezone_name": "Europe/London"})
+    assert fake.created[-1]["startTime"] == "2026-10-14T03:10:00.000+01:00"
 
 
 # --- Refresh and revoke --------------------------------------------------------------------
