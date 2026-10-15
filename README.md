@@ -38,17 +38,8 @@ For more installation options, see the [uv documentation](https://docs.astral.sh
 
 ## Usage
 
-### Option 1: Run directly from GitHub (no checkout required)
-
-You can run the script directly from GitHub without cloning the repository:
-
-```bash
-uv run https://raw.githubusercontent.com/xkrogen/happiest-baby-exporter/refs/heads/main/happiest-baby-exporter.py
-```
-
-This will prompt you for your email and password interactively.
-
-### Option 2: Clone and run locally
+Clone the repository and run the script from it. It needs the `happiest_baby/`
+package that sits next to it, so it can't be run from a single downloaded file.
 
 ```bash
 git clone https://github.com/xkrogen/happiest-baby-exporter.git

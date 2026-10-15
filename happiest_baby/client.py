@@ -3,7 +3,7 @@
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 
@@ -183,10 +183,17 @@ class HappiestBabyClient:
     # --- SNOO sleep sessions ------------------------------------------------------
 
     def sleep_sessions(self, baby_id: str, from_date: datetime, to_date: datetime, tz: str) -> List[Dict[str, Any]]:
-        """Sleep sessions (SNOO and manually logged) overlapping the range, one entry per session.
+        """Sleep sessions (SNOO and manually logged) overlapping the range, one entry per session."""
+        return consolidate_sleep_levels(*self.sleep_levels(baby_id, from_date, to_date, tz))
+
+    def sleep_levels(
+        self, baby_id: str, from_date: datetime, to_date: datetime, tz: str
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """The raw per-level rows (levels, detailedLevels) of sleep sessions overlapping the range.
 
         The API groups sessions into days starting at 6 AM, so the day before is fetched too:
-        a session that began before the first day's 6 AM is then returned whole.
+        a session that began before the first day's 6 AM is then returned whole. Sessions that
+        ended before from_date are dropped.
         """
         days = []
         day = from_date.replace(hour=6, minute=0, second=0, microsecond=0) - timedelta(days=1)
@@ -213,20 +220,28 @@ class HappiestBabyClient:
                     detailed.extend(data.get("detailedLevels", []))
                 elif isinstance(data, list):
                     levels.extend(data)
-        return [s for s in consolidate_sleep_levels(levels, detailed) if not _ended_before(s, from_date)]
+
+        ended = _sessions_ended_before(levels, from_date)
+        return (
+            [row for row in levels if row.get("sessionId") not in ended],
+            [row for row in detailed if row.get("sessionId") not in ended],
+        )
 
 
-def _parse_api_time(value: str) -> datetime:
-    """Parse an API time such as 2026-10-12T14:50:00-0400."""
-    return datetime.strptime(value[:19] + value[-5:], "%Y-%m-%dT%H:%M:%S%z")
-
-
-def _ended_before(session: Dict[str, Any], when: datetime) -> bool:
-    try:
-        start = _parse_api_time(session["startTime"])
-    except (TypeError, ValueError):
-        return False
-    return start + timedelta(seconds=session["totalSeconds"]) < when
+def _sessions_ended_before(levels: List[Dict[str, Any]], cutoff: datetime) -> Set[str]:
+    """Ids of sessions whose every level row ended before cutoff (rows without a readable time count as not ended)."""
+    ends: Dict[str, datetime] = {}
+    never = datetime.max.replace(tzinfo=timezone.utc)
+    for row in levels:
+        try:
+            value = row["startTimeFormatted"]
+            start = datetime.strptime(value[:19] + value[-5:], "%Y-%m-%dT%H:%M:%S%z")  # 2026-10-12T14:50:00-0400
+            end = start + timedelta(seconds=row.get("stateDuration") or 0)
+        except (KeyError, TypeError, ValueError):
+            end = never
+        session_id = row.get("sessionId")
+        ends[session_id] = max(end, ends.get(session_id, end))
+    return {session_id for session_id, end in ends.items() if end < cutoff}
 
 
 def consolidate_sleep_levels(

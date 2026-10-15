@@ -51,7 +51,9 @@ need code execution or network settings.
 4. Read the CSVs it wrote:
    - `journals_consolidated.csv` — every entry across types, one row each, sorted by time
      (durations in seconds, amounts in oz unless metric)
-   - `journals_sleep.csv` — one row per sleep session (`stateDuration` in seconds)
+   - `journals_sleep.csv` — one row per sleep session (`stateDuration` in seconds); `source` is
+     `snoo`, or `manual` for sleep logged in the app outside the SNOO, with its tag in `label`
+     (e.g. `in_arms`) and any `note`
    - `journals_<type>.csv` — full detail per journal type
    Types with no entries in the window produce no file.
 

@@ -1,4 +1,4 @@
-"""Exporter helpers shared with happiest-baby-actions.py."""
+"""The exporter CLI on top of the shared happiest_baby package."""
 
 import importlib.util
 import os
@@ -38,15 +38,27 @@ def test_empty_stdin_fails_with_a_clear_error(monkeypatch, capsys):
     assert "No credentials provided" in capsys.readouterr().err
 
 
-def test_sessions_that_ended_before_the_window_are_dropped():
-    def level(session, start, seconds):
-        return {"sessionId": session, "startTimeFormatted": start, "stateDuration": seconds}
-
+def test_sleep_csv_rows_come_from_the_shared_client():
     levels = [
-        level("before", "2026-10-12T22:00:00-0400", 3600),  # ended 23:00, before the cutoff
-        level("spans", "2026-10-13T04:25:36-0400", 5664),   # began before the cutoff, ended after
-        level("spans", "2026-10-13T06:00:00-0400", 5496),
+        {"sessionId": "s1", "type": "asleep", "startTime": "2026-10-13 04:25:36.000",
+         "startTimeFormatted": "2026-10-13T04:25:36-0400", "stateDuration": 600},
+        {"sessionId": "s1", "type": "soothing", "startTime": "2026-10-13 04:35:36.000",
+         "startTimeFormatted": "2026-10-13T04:35:36-0400", "stateDuration": 60},
+        {"sessionId": "m1", "type": "manual", "startTime": "2026-10-13 14:50:00.000",
+         "startTimeFormatted": "2026-10-13T14:50:00-0400", "stateDuration": 2400},
     ]
-    cutoff = datetime(2026, 10, 13, 9, 0, tzinfo=timezone.utc)  # 05:00 EDT
-    kept = exporter.drop_sessions_ended_before(levels, cutoff)
-    assert [lv["sessionId"] for lv in kept] == ["spans", "spans"]
+    detailed = [{"sessionId": "m1", "level": "MANUAL", "label": "in_arms"}]
+
+    class Client:
+        def sleep_levels(self, baby_id, from_date, to_date, tz):
+            return levels, detailed
+
+    window = datetime(2026, 10, 13, tzinfo=timezone.utc)
+    raw, rows = exporter.fetch_sleep_sessions(Client(), "b", window, window, "America/New_York")
+    assert raw == levels
+    assert rows == [
+        {"sessionId": "s1", "startTime": "2026-10-13 04:25:36", "startTimeFormatted": "2026-10-13T04:25:36-0400",
+         "stateDuration": 660, "type": "asleep,soothing", "source": "snoo", "label": "", "note": ""},
+        {"sessionId": "m1", "startTime": "2026-10-13 14:50:00", "startTimeFormatted": "2026-10-13T14:50:00-0400",
+         "stateDuration": 2400, "type": "manual", "source": "manual", "label": "in_arms", "note": ""},
+    ]

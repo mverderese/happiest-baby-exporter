@@ -11,6 +11,7 @@ from .client import (
     HappiestBabyClient,
     HappiestBabyError,
     authenticate_password,
+    consolidate_sleep_levels,
     refresh_session,
     revoke_refresh_token,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "SnooNotConfirmed",
     "api_time",
     "authenticate_password",
+    "consolidate_sleep_levels",
     "describe_state",
     "parse_time",
     "refresh_session",
