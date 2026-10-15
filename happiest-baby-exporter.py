@@ -13,6 +13,7 @@ Export journal data from Happiest Baby API to CSV files.
 import csv
 import json
 import os
+import select
 import sys
 from datetime import datetime, timedelta, timezone as dt_timezone
 from pathlib import Path
@@ -213,7 +214,10 @@ def fetch_sleep_sessions(
     click.echo(f"Fetching sleep sessions from {from_date.date()} to {to_date.date()}...")
 
     all_sessions = []
-    current_date = from_date.replace(hour=6, minute=0, second=0, microsecond=0)
+    # The API groups sessions into days starting at 6 AM. Start a day early so a session that
+    # began before the first day's 6 AM is included whole; sessions that ended before
+    # from_date are dropped below.
+    current_date = from_date.replace(hour=6, minute=0, second=0, microsecond=0) - timedelta(days=1)
 
     # The API fetches sessions per day, so iterate through each day
     while current_date.date() <= to_date.date():
@@ -240,8 +244,25 @@ def fetch_sleep_sessions(
         all_sessions.extend(sessions)
         current_date += timedelta(days=1)
 
+    all_sessions = drop_sessions_ended_before(all_sessions, from_date)
     click.echo(f"  Retrieved {len(all_sessions)} entries")
     return all_sessions
+
+
+def drop_sessions_ended_before(levels: List[Dict[str, Any]], cutoff: datetime) -> List[Dict[str, Any]]:
+    """Remove the level rows of every session that ended before cutoff."""
+    ends: Dict[str, datetime] = {}
+    for level in levels:
+        try:
+            start = level["startTimeFormatted"]
+            end = datetime.strptime(start[:19] + start[-5:], "%Y-%m-%dT%H:%M:%S%z") + timedelta(
+                seconds=level.get("stateDuration") or 0
+            )
+        except (KeyError, TypeError, ValueError):
+            end = datetime.max.replace(tzinfo=dt_timezone.utc)  # can't tell; keep the session
+        session_id = level.get("sessionId")
+        ends[session_id] = max(end, ends.get(session_id, end))
+    return [level for level in levels if ends[level.get("sessionId")] >= cutoff]
 
 
 def get_id_token(
@@ -259,26 +280,40 @@ def get_id_token(
         )
         sys.exit(1)
 
-    click.echo("Authenticating with Happiest Baby...")
+    # Progress goes to stderr so callers printing JSON (happiest-baby-actions.py) keep stdout clean
+    click.echo("Authenticating with Happiest Baby...", err=True)
     if credentials_file:
-        click.echo(f"  Using refresh token from {credentials_file}")
+        click.echo(f"  Using refresh token from {credentials_file}", err=True)
         token = authenticate_with_refresh_token(load_refresh_token(credentials_file))
     elif refresh_token:
-        click.echo("  Using refresh token from --refresh-token / HAPPIESTBABY_REFRESH_TOKEN")
+        click.echo("  Using refresh token from --refresh-token / HAPPIESTBABY_REFRESH_TOKEN", err=True)
         token = authenticate_with_refresh_token(refresh_token)
     else:
-        if not (email and password) and not sys.stdin.isatty():
-            click.echo(
-                "Error: No credentials provided; pass --credentials-file, --refresh-token, "
-                "or --email and --password",
-                err=True,
-            )
+        no_credentials = (
+            "Error: No credentials provided; pass --credentials-file, --refresh-token, "
+            "or --email and --password"
+        )
+        # Prompt on a terminal, or read answers piped to stdin; fail fast if nothing can answer
+        if not (email and password) and not sys.stdin.isatty() and not _stdin_has_data():
+            click.echo(no_credentials, err=True)
             sys.exit(1)
-        email = email or click.prompt("Email")
-        password = password or click.prompt("Password", hide_input=True)
+        try:
+            email = email or click.prompt("Email", err=True)
+            password = password or click.prompt("Password", hide_input=True, err=True)
+        except click.Abort:  # stdin ended before both answers
+            click.echo(f"\n{no_credentials}", err=True)
+            sys.exit(1)
         token = authenticate(email, password)["IdToken"]
-    click.echo("✓ Authentication successful")
+    click.echo("✓ Authentication successful", err=True)
     return token
+
+
+def _stdin_has_data(wait: float = 1.0) -> bool:
+    """Whether non-terminal stdin has input (or EOF) to read, waiting briefly for a pipe to fill."""
+    try:
+        return bool(select.select([sys.stdin], [], [], wait)[0])
+    except (OSError, ValueError):  # e.g. Windows, where select() doesn't take pipes
+        return False
 
 
 def select_baby(token: str, baby_name: Optional[str]) -> Dict[str, Any]:

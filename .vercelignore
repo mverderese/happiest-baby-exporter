@@ -1,0 +1,13 @@
+# The Vercel CLI uploads the working copy and doesn't read .gitignore, so keep local
+# secrets and baby data out of deployments made with `vercel deploy`.
+# Refresh tokens (build_skill.py output and credentials)
+dist/
+credentials.json
+.token
+.env*
+# Exported baby data
+journals_*
+# Local tooling
+.claude
+.vercel
+__pycache__/

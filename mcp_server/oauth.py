@@ -272,13 +272,15 @@ class StatelessOAuthProvider:
             return retry("Enter a time zone name like America/Chicago or Europe/London.")
         if not self.settings.allowed_emails:
             return retry("This server has no allowed accounts yet. Set ALLOWED_EMAILS in its environment.")
-        # Check the allowlist before contacting Cognito, so the server can't be used to test passwords
+        # Check the allowlist before contacting Cognito, so the server can't be used to test passwords.
+        # Both failures share one message so the page doesn't reveal which emails are allowed.
+        rejected = "Email or password is incorrect, or this account isn't allowed on this server."
         if not self.settings.email_allowed(email):
-            return retry("This account isn't allowed on this server.")
+            return retry(rejected)
         try:
             result = await anyio.to_thread.run_sync(hb.authenticate_password, email, password)
         except hb.AuthError:
-            return retry("Email or password is incorrect.")
+            return retry(rejected)
         except hb.HappiestBabyError:
             return retry("Couldn't reach Happiest Baby. Try again in a minute.")
 

@@ -118,7 +118,7 @@ def exchange(
 
     matched = threading.Event()
     connected = threading.Event()
-    state: Dict[str, Any] = {"last": None, "error": None, "result": None}
+    state: Dict[str, Any] = {"last": None, "error": None, "result": None, "sent": False}
 
     def publish(payload: Dict[str, Any]) -> None:
         ts = int(datetime.now().timestamp() * 10_000_000)  # the app's timestamp format
@@ -133,8 +133,20 @@ def exchange(
         client.subscribe(ACTIVITY_TOPIC.format(thing=thing), qos=1)
 
     def on_subscribe(client, userdata, mid, reason_codes, properties):
+        refused = [rc for rc in reason_codes if rc.is_failure]
+        if refused:
+            state["error"] = f"Subscribing to the SNOO's status was refused: {refused[0]}"
+            connected.set()
+            matched.set()
+            return
         connected.set()
-        publish(command if command else {"command": "send_status"})
+        # loop_start() reconnects and on_connect subscribes again, so this can run more than
+        # once. Send the command only the first time; it must never reach the SNOO twice.
+        if command and not state["sent"]:
+            state["sent"] = True
+            publish(command)
+        else:
+            publish({"command": "send_status"})
 
     def on_disconnect(client, userdata, flags, reason_code, properties):
         if not connected.is_set():

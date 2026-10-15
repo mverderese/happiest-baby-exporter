@@ -146,7 +146,7 @@ def select_device(ctx: Context, device: Optional[str]) -> Dict[str, Any]:
 def run_snoo(ctx: Context, device: Optional[str], plan: str, action: str, **options: Any) -> None:
     dev = select_device(ctx, device)
     ctx.confirm(f"{plan} on {dev.get('name', 'SNOO')}")
-    click.echo(f"Connecting to {dev.get('name', 'SNOO')}...")
+    click.echo(f"Connecting to {dev.get('name', 'SNOO')}...", err=True)
     try:
         result = hb.snoo_command(ctx.client.id_token, dev, action, **options)
     except hb.SnooNotConfirmed as e:
@@ -178,7 +178,7 @@ def snoo_devices(ctx: Context):
 def snoo_status(ctx: Context, device: Optional[str], as_json: bool):
     """Show the SNOO's current level, hold, and timer."""
     dev = select_device(ctx, device)
-    click.echo(f"Connecting to {dev.get('name', 'SNOO')}...")
+    click.echo(f"Connecting to {dev.get('name', 'SNOO')}...", err=True)
     try:
         result = hb.snoo_status(ctx.client.id_token, dev)
     except hb.HappiestBabyError as e:

@@ -210,10 +210,12 @@ def test_registration_rejects_foreign_redirects(client):
 
 
 def test_wrong_password_and_unlisted_email(client, fake):
-    _, _, r = sign_in(client, password="nope")
-    assert r.status_code == 400 and "incorrect" in r.text
-    _, _, r = sign_in(client, email="stranger@example.com")
-    assert r.status_code == 400 and "isn&#x27;t allowed" in r.text
+    _, _, wrong_password = sign_in(client, password="nope")
+    _, _, unlisted = sign_in(client, email="stranger@example.com")
+    assert wrong_password.status_code == unlisted.status_code == 400
+    # One message for both, so the page doesn't reveal which emails are allowed
+    message = "Email or password is incorrect, or this account isn&#x27;t allowed on this server."
+    assert message in wrong_password.text and message in unlisted.text
 
 
 def test_sign_in_page_prefills_time_zone_and_rejects_unknown(client):

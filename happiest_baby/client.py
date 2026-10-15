@@ -1,6 +1,7 @@
 """Cognito auth and the Happiest Baby REST API."""
 
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -21,6 +22,7 @@ PUMPING_CREATE_ENDPOINT = "/cs/me/v11/pumping-journals"
 
 JOURNAL_TYPES = ["breastfeeding", "bottlefeeding", "diaper", "solidfood", "pumping"]
 TIMEOUT = 30
+SLEEP_FETCH_WORKERS = 8
 
 
 class HappiestBabyError(Exception):
@@ -186,23 +188,31 @@ class HappiestBabyClient:
         The API groups sessions into days starting at 6 AM, so the day before is fetched too:
         a session that began before the first day's 6 AM is then returned whole.
         """
-        levels: List[Dict[str, Any]] = []
-        detailed: List[Dict[str, Any]] = []
+        days = []
         day = from_date.replace(hour=6, minute=0, second=0, microsecond=0) - timedelta(days=1)
         while day.date() <= to_date.date():
+            days.append(day)
+            day += timedelta(days=1)
+
+        def fetch(day: datetime) -> Any:
             params = {
                 "detailedLevels": "true",
                 "levels": "true",
                 "startTime": day.strftime("%Y-%m-%d %H:%M:%S.000"),
                 "timezone": tz,
             }
-            data = self.request("GET", SLEEP_ENDPOINT.format(baby_id=baby_id), params=params)
-            if isinstance(data, dict):
-                levels.extend(data.get("levels", []))
-                detailed.extend(data.get("detailedLevels", []))
-            elif isinstance(data, list):
-                levels.extend(data)
-            day += timedelta(days=1)
+            return self.request("GET", SLEEP_ENDPOINT.format(baby_id=baby_id), params=params)
+
+        # One request per day; fetched concurrently so a month fits in a serverless time limit
+        levels: List[Dict[str, Any]] = []
+        detailed: List[Dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=SLEEP_FETCH_WORKERS) as pool:
+            for data in pool.map(fetch, days):
+                if isinstance(data, dict):
+                    levels.extend(data.get("levels", []))
+                    detailed.extend(data.get("detailedLevels", []))
+                elif isinstance(data, list):
+                    levels.extend(data)
         return [s for s in consolidate_sleep_levels(levels, detailed) if not _ended_before(s, from_date)]
 
 
