@@ -174,7 +174,8 @@ zip, or network allowlists. This is the most reliable way to control the SNOO fr
 Claude. The skill above is still handy for CSV exports.
 
 Tools: `snoo_status`, `snoo_start`, `snoo_stop`, `snoo_set_level`, `snoo_white_noise`,
-`list_snoos`, `get_sleep_sessions`, `get_journal_entries`, `log_diaper`, and the
+`list_snoos`, `get_sleep_sessions`, `get_journal_entries`, `log_diaper`, `log_sleep`
+(naps outside the SNOO, such as in arms), `delete_sleep`, and the
 experimental `log_journal_entry` and `delete_journal_entry`. Claude asks before using
 tools that change something, unless you allow them in the connector's settings.
 

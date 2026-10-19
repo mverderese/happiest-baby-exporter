@@ -42,5 +42,10 @@ def api_time(at: datetime) -> str:
     return at.isoformat(timespec="milliseconds")
 
 
+def sleep_api_time(at: datetime, tz: ZoneInfo) -> str:
+    """The sleep service wants local wall time with milliseconds and no offset."""
+    return at.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S.000")
+
+
 def show_time(at: datetime, tz: ZoneInfo) -> str:
     return at.astimezone(tz).strftime("%a %b %-d %-I:%M %p %Z")
