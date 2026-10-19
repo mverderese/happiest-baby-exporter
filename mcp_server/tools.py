@@ -194,7 +194,7 @@ def get_journal_entries(
 @mcp.tool(annotations=READ)
 def get_sleep_sessions(hours: int = 24, baby_name: Optional[str] = None, timezone_name: Optional[str] = None) -> List[Dict[str, Any]]:
     """Sleep sessions overlapping the last `hours` hours: start time, total seconds, and seconds per
-    state (e.g. asleep, soothing). source is "snoo", or "manual" for sleep logged in the app outside
+    state (e.g. asleep, soothing), plus `levels`: each state's own start and end time in order. source is "snoo", or "manual" for sleep logged in the app outside
     the SNOO, which may carry a label (the app's tag, e.g. in_arms) and a free-text note."""
     if not 1 <= hours <= 24 * 31:
         raise ToolError("hours must be between 1 and 744")
