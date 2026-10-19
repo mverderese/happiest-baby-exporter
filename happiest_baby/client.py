@@ -257,10 +257,26 @@ def _sessions_ended_before(levels: List[Dict[str, Any]], cutoff: datetime) -> Se
     return {session_id for session_id, end in ends.items() if end < cutoff}
 
 
+def _level_segment(row: Dict[str, Any]) -> Dict[str, Any]:
+    """One level row as {type, start, end, seconds}; end is None when the row has no readable start/duration."""
+    start = row.get("startTimeFormatted") or row.get("startTime")
+    seconds = row.get("stateDuration")
+    end = None
+    try:
+        value = row["startTimeFormatted"]
+        begun = datetime.strptime(value[:19] + value[-5:], "%Y-%m-%dT%H:%M:%S%z")
+        end = (begun + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%S%z")
+    except (KeyError, TypeError, ValueError):
+        pass
+    return {"type": row.get("type") or "unknown", "start": start, "end": end,
+            "seconds": int(seconds) if isinstance(seconds, (int, float)) else None}
+
+
 def consolidate_sleep_levels(
     levels: List[Dict[str, Any]], detailed: Optional[List[Dict[str, Any]]] = None
 ) -> List[Dict[str, Any]]:
-    """Merge per-level rows into sessions: start, summed seconds per level type, and whether the
+    """Merge per-level rows into sessions: start, summed seconds per level type, each level's own
+    start and end time (in "levels"), and whether the
     session was logged manually in the app (with its tag, e.g. in_arms, and note, if any)."""
     by_session: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for level in levels:
@@ -293,6 +309,7 @@ def consolidate_sleep_levels(
             "startTime": info.get("start") or rows[0].get("startTimeFormatted") or rows[0].get("startTime"),
             "totalSeconds": int(sum(seconds_by_type.values())),
             "secondsByType": {k: int(v) for k, v in sorted(seconds_by_type.items())},
+            "levels": [_level_segment(row) for row in rows],
         }
         session.update({key: info[key] for key in ("label", "note") if key in info})
         sessions.append(session)

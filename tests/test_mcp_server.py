@@ -378,4 +378,7 @@ def test_sleep_sessions_mark_manual_and_span_6am_days():
     manual, snoo = sessions
     assert manual["source"] == "manual" and manual["label"] == "in_arms" and manual["note"] == "walk"
     assert snoo["source"] == "snoo" and "label" not in snoo
+    assert snoo["levels"][1] == {"type": "asleep", "start": "2026-10-13T06:00:00-0400",
+                                 "end": "2026-10-13T07:31:36-0400", "seconds": 5496}
+    assert snoo["levels"][2]["end"] == "2026-10-13T07:42:52-0400"
     assert snoo["startTime"] == "2026-10-13T04:25:36-0400" and snoo["totalSeconds"] == 5664 + 5496 + 676
