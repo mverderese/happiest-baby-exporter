@@ -16,7 +16,7 @@ from .client import (
     revoke_refresh_token,
 )
 from .snoo import LEVELS, SnooError, SnooNotConfirmed, describe_state, snoo_command, snoo_status
-from .timeutil import api_time, parse_time, show_time
+from .timeutil import api_time, parse_time, show_time, sleep_api_time
 
 __all__ = [
     "API_BASE_URL",
@@ -34,6 +34,7 @@ __all__ = [
     "refresh_session",
     "revoke_refresh_token",
     "show_time",
+    "sleep_api_time",
     "snoo_command",
     "snoo_status",
 ]

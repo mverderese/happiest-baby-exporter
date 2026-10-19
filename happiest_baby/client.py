@@ -16,6 +16,8 @@ DEVICES_ENDPOINT = "/hds/me/v11/devices"
 JOURNALS_ENDPOINT = "/cs/me/v11/babies/{baby_id}/journals/tracking"
 PUMPING_ENDPOINT = "/cs/me/v11/pumping-journals/tracking"
 SLEEP_ENDPOINT = "/ss/me/v11/babies/{baby_id}/sessions/daily"
+MANUAL_SLEEP_ENDPOINT = "/ss/me/v11/babies/{baby_id}/manual-sessions"
+MANUAL_SLEEP_ITEM_ENDPOINT = "/ss/me/v11/babies/{baby_id}/manual-sessions/{session_id}"
 JOURNAL_CREATE_ENDPOINT = "/cs/me/v11/journals"
 JOURNAL_ITEM_ENDPOINT = "/cs/me/v11/journals/{journal_id}"
 PUMPING_CREATE_ENDPOINT = "/cs/me/v11/pumping-journals"
@@ -181,6 +183,17 @@ class HappiestBabyClient:
         self.request("DELETE", JOURNAL_ITEM_ENDPOINT.format(journal_id=journal_id))
 
     # --- SNOO sleep sessions ------------------------------------------------------
+
+    def create_manual_sleep(self, baby_id: str, payload: Dict[str, Any]) -> Any:
+        """Log sleep outside the SNOO. payload: startTime and endTime as local
+        'YYYY-MM-DD HH:mm:ss.SSS', plus label (the app's tag, e.g. in_arms) and an optional note.
+        The API accepts any label string, so callers should only pass tags the app uses."""
+        return self.request("POST", MANUAL_SLEEP_ENDPOINT.format(baby_id=baby_id), json=payload)
+
+    def delete_manual_sleep(self, baby_id: str, session_id: str) -> None:
+        if not session_id.isalnum():
+            raise HappiestBabyError("That doesn't look like a sleep session id")
+        self.request("DELETE", MANUAL_SLEEP_ITEM_ENDPOINT.format(baby_id=baby_id, session_id=session_id))
 
     def sleep_sessions(self, baby_id: str, from_date: datetime, to_date: datetime, tz: str) -> List[Dict[str, Any]]:
         """Sleep sessions (SNOO and manually logged) overlapping the range, one entry per session."""

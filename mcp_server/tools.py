@@ -19,7 +19,7 @@ be brief and state the outcome plainly ("SNOO is now: LEVEL2, hold on").
 - Before a write, if you inferred anything the user didn't say (which baby or SNOO, the
   time, pee vs. poo, the level), confirm it with them first.
 - Never repeat a write that failed or timed out without first checking state with
-  snoo_status or get_journal_entries, so nothing happens twice.
+  snoo_status, get_journal_entries, or get_sleep_sessions, so nothing happens twice.
 - Always pass on a "safety clip not attached" warning.
 - log_journal_entry is experimental: first call get_journal_entries for that type and copy
   the shape of an existing entry's "data" object exactly. If there are none to copy, say
@@ -260,6 +260,48 @@ def log_journal_entry(
     if end and end < start:
         raise ToolError("end_time is before time")
     return _create(_client(), journal_type, data, baby_name, start, end, note, tz)
+
+
+@mcp.tool(annotations=JOURNAL_WRITE)
+def log_sleep(
+    start_time: str,
+    end_time: str,
+    label: str = "in_arms",
+    note: Optional[str] = None,
+    baby_name: Optional[str] = None,
+    timezone_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Log sleep outside the SNOO (e.g. an in-arms nap). start_time/end_time: ISO 8601 with
+    offset, or now, 15m, 2h, HH:MM in timezone_name. label is the app's tag: in_arms, or
+    another label copied from an existing manual session in get_sleep_sessions."""
+    tz = _tz(timezone_name)
+    start, end = _time(start_time, tz), _time(end_time, tz)
+    if end <= start:
+        raise ToolError("end_time must be after start_time")
+    if end - start > timedelta(hours=24):
+        raise ToolError("That's over 24 hours; check the times")
+    payload: Dict[str, Any] = {
+        "startTime": hb.sleep_api_time(start, tz), "endTime": hb.sleep_api_time(end, tz), "label": label,
+    }
+    if note:
+        payload["note"] = note
+    client = _client()
+    baby = _baby(client, baby_name)
+    created = _call(client.create_manual_sleep, baby["_id"], payload)
+    return {
+        "logged": "sleep", "baby": baby.get("babyName"), "label": label,
+        "from": hb.show_time(start, tz), "to": hb.show_time(end, tz),
+        "minutes": int((end - start).total_seconds() // 60),
+        "sessionId": created.get("sessionId") if isinstance(created, dict) else None,
+    }
+
+
+@mcp.tool(annotations=DELETE)
+def delete_sleep(session_id: str, baby_name: Optional[str] = None) -> Dict[str, Any]:
+    """Delete sleep logged outside the SNOO, by its sessionId (a "manual" session from get_sleep_sessions)."""
+    client = _client()
+    _call(client.delete_manual_sleep, _baby(client, baby_name)["_id"], session_id)
+    return {"deleted": session_id}
 
 
 @mcp.tool(annotations=DELETE)

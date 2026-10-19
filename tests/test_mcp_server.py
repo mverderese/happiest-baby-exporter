@@ -35,6 +35,7 @@ class FakeHappiestBaby:
 
     def __init__(self):
         self.created = []
+        self.deleted = []
         self.revoked = []
         self.snoo = {"state": "ONLINE", "hold": "off"}
 
@@ -60,6 +61,12 @@ class FakeHappiestBaby:
         if method == "POST" and endpoint.endswith("/journals"):
             self.created.append(kwargs["json"])
             return {"id": "j1", **kwargs["json"]}
+        if method == "POST" and endpoint.endswith("/manual-sessions"):
+            self.created.append(kwargs["json"])
+            return {"success": True, "sessionId": "s1"}
+        if method == "DELETE" and "/manual-sessions/" in endpoint:
+            self.deleted.append(endpoint)
+            return {"success": True}
         if "journals/tracking" in endpoint:
             return [{"id": "j0", "type": kwargs["params"]["journalType"], "startTime": "2026-10-14T10:00:00.000Z",
                      "data": {"types": ["pee"]}}]
@@ -273,6 +280,31 @@ def test_tools_end_to_end(client, fake):
 
     result = call_tool(client, token, "get_journal_entries", {"journal_type": "diaper"})
     assert not result.get("isError"), result
+
+
+def test_log_and_delete_sleep(client, fake):
+    _, tokens = get_tokens(client)
+    token = tokens["access_token"]
+
+    result = call_tool(client, token, "log_sleep", {
+        "start_time": "2026-10-19T10:05:00-04:00", "end_time": "2026-10-19T13:35:00-04:00", "note": "walk",
+    })
+    assert not result.get("isError"), result
+    assert fake.created == [{
+        "startTime": "2026-10-19 10:05:00.000", "endTime": "2026-10-19 13:35:00.000",
+        "label": "in_arms", "note": "walk",
+    }]
+    assert result["structuredContent"]["result"]["minutes"] == 210
+    assert result["structuredContent"]["result"]["sessionId"] == "s1"
+
+    result = call_tool(client, token, "log_sleep", {
+        "start_time": "2026-10-19T13:35:00-04:00", "end_time": "2026-10-19T10:05:00-04:00",
+    })
+    assert result["isError"] and len(fake.created) == 1
+
+    result = call_tool(client, token, "delete_sleep", {"session_id": "s1"})
+    assert not result.get("isError"), result
+    assert fake.deleted == ["/ss/me/v11/babies/baby1/manual-sessions/s1"]
 
 
 def test_time_zone_from_sign_in_survives_refresh(client, fake):
