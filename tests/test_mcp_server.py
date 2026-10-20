@@ -362,8 +362,13 @@ def test_sleep_sessions_mark_manual_and_span_6am_days():
         "2026-10-13": {
             "levels": [level("s1", "asleep", "2026-10-13T06:00:00-0400", 5496),
                        level("s1", "soothing", "2026-10-13T07:31:36-0400", 676)],
-            "detailedLevels": [{"sessionId": "s1", "level": "BASELINE",
-                                "sessionDetails": {"startFormatted": "2026-10-13T04:25:36-0400"}}],
+            "detailedLevels": [
+                {"sessionId": "s1", "level": "BASELINE", "hold": False, "startTime": "2026-10-13 06:00:00.000",
+                 "startTimeFormatted": "2026-10-13T06:00:00-0400", "stateDuration": 5496,
+                 "sessionDetails": {"startFormatted": "2026-10-13T04:25:36-0400"}},
+                {"sessionId": "s1", "level": "LEVEL2", "hold": True, "startTime": "2026-10-13 07:31:36.000",
+                 "startTimeFormatted": "2026-10-13T07:31:36-0400", "stateDuration": 676,
+                 "sessionDetails": {"startFormatted": "2026-10-13T04:25:36-0400"}}],
         },
     }
 
@@ -378,7 +383,13 @@ def test_sleep_sessions_mark_manual_and_span_6am_days():
     manual, snoo = sessions
     assert manual["source"] == "manual" and manual["label"] == "in_arms" and manual["note"] == "walk"
     assert snoo["source"] == "snoo" and "label" not in snoo
-    assert snoo["levels"][1] == {"type": "asleep", "start": "2026-10-13T06:00:00-0400",
+    assert snoo["levels"] == [
+        {"level": "baseline", "start": "2026-10-13T06:00:00-0400", "end": "2026-10-13T07:31:36-0400",
+         "seconds": 5496, "hold": False},
+        {"level": "2", "start": "2026-10-13T07:31:36-0400", "end": "2026-10-13T07:42:52-0400",
+         "seconds": 676, "hold": True}]
+    assert manual["levels"] == []
+    assert snoo["states"][1] == {"type": "asleep", "start": "2026-10-13T06:00:00-0400",
                                  "end": "2026-10-13T07:31:36-0400", "seconds": 5496}
-    assert snoo["levels"][2]["end"] == "2026-10-13T07:42:52-0400"
+    assert snoo["states"][2]["end"] == "2026-10-13T07:42:52-0400"
     assert snoo["startTime"] == "2026-10-13T04:25:36-0400" and snoo["totalSeconds"] == 5664 + 5496 + 676
