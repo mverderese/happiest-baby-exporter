@@ -257,8 +257,8 @@ def _sessions_ended_before(levels: List[Dict[str, Any]], cutoff: datetime) -> Se
     return {session_id for session_id, end in ends.items() if end < cutoff}
 
 
-def _level_segment(row: Dict[str, Any]) -> Dict[str, Any]:
-    """One level row as {type, start, end, seconds}; end is None when the row has no readable start/duration."""
+def _segment(row: Dict[str, Any], kind: str) -> Dict[str, Any]:
+    """One row as {<kind>, start, end, seconds}; end is None when the row has no readable start/duration."""
     start = row.get("startTimeFormatted") or row.get("startTime")
     seconds = row.get("stateDuration")
     end = None
@@ -268,16 +268,25 @@ def _level_segment(row: Dict[str, Any]) -> Dict[str, Any]:
         end = (begun + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%S%z")
     except (KeyError, TypeError, ValueError):
         pass
-    return {"type": row.get("type") or "unknown", "start": start, "end": end,
+    return {kind: row.get("type") or "unknown", "start": start, "end": end,
             "seconds": int(seconds) if isinstance(seconds, (int, float)) else None}
+
+
+def _snoo_level(row: Dict[str, Any]) -> Dict[str, Any]:
+    """A detailedLevels row as {level, hold, start, end, seconds}; level is baseline, 1-4, or pretimeout."""
+    segment = _segment(row, "level")
+    raw = str(row.get("level") or "unknown").lower()
+    segment["level"] = "baseline" if raw == "baseline" else raw.removeprefix("level")
+    segment["hold"] = bool(row.get("hold"))
+    return segment
 
 
 def consolidate_sleep_levels(
     levels: List[Dict[str, Any]], detailed: Optional[List[Dict[str, Any]]] = None
 ) -> List[Dict[str, Any]]:
-    """Merge per-level rows into sessions: start, summed seconds per level type, each level's own
-    start and end time (in "levels"), and whether the
-    session was logged manually in the app (with its tag, e.g. in_arms, and note, if any)."""
+    """Merge per-level rows into sessions: start, summed seconds per state type, each state's own
+    start and end (in "states"), the SNOO level history (in "levels": baseline, 1-4, with hold),
+    and whether the session was logged manually in the app (with its tag, e.g. in_arms, and note, if any)."""
     by_session: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for level in levels:
         if level.get("sessionId"):
@@ -290,6 +299,8 @@ def consolidate_sleep_levels(
                 info[key] = row[key]
         if row.get("level") == "MANUAL":
             info["manual"] = True
+        else:
+            info.setdefault("levels", {})[row.get("startTime")] = row
         start = (row.get("sessionDetails") or {}).get("startFormatted")
         if start:
             info["start"] = start
@@ -309,7 +320,8 @@ def consolidate_sleep_levels(
             "startTime": info.get("start") or rows[0].get("startTimeFormatted") or rows[0].get("startTime"),
             "totalSeconds": int(sum(seconds_by_type.values())),
             "secondsByType": {k: int(v) for k, v in sorted(seconds_by_type.items())},
-            "levels": [_level_segment(row) for row in rows],
+            "states": [_segment(row, "type") for row in rows],
+            "levels": [_snoo_level(row) for _, row in sorted(info.get("levels", {}).items(), key=lambda i: i[0] or "")],
         }
         session.update({key: info[key] for key in ("label", "note") if key in info})
         sessions.append(session)
